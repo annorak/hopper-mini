@@ -57,6 +57,38 @@ We also look for mistakes the current graders missed. Those can become new grade
 
 Every rerun goes through the same receiver, log, writer, and graders. A separate answer-key checker helps us see whether better grades actually mean better answers.
 
+## Receive traces
+
+Run the OTLP/HTTP receiver in the foreground:
+
+```sh
+hopper ingest serve
+hopper ingest serve --fsync per-request
+hopper ingest serve --full-fsync
+```
+
+`--full-fsync` uses macOS `F_FULLFSYNC`. The default uses group commit. `HOPPER_ENDPOINT` defaults to `http://127.0.0.1:4318` and must be an HTTP loopback origin.
+
+To run the receiver under local supervision, use:
+
+```sh
+hopper stack up
+hopper stack status
+hopper stack down
+```
+
+These commands print JSON. `up` waits for its receiver to open the WAL and bind the listener. A failed first start cleans up the supervisor. After a successful start, the supervisor restarts a crashed receiver with a retry delay capped at one second. `down` stops restarts and gives the owned receiver five seconds to drain before sending SIGKILL. If the supervisor dies, its receiver detects the closed parent connection and drains. Logs are in `$HOPPER_DATA_DIR/.stack/supervisor.log`.
+
+Send `POST /v1/traces` with `Content-Type: application/x-protobuf` and optional `Content-Encoding: gzip`. The receiver keeps the original body, including gzip bytes. HTTP 200 contains an empty `ExportTraceServiceResponse` and follows the WAL's durable receipt. Empty protobuf requests are valid. Each span needs a 16-byte trace ID and an 8-byte span ID.
+
+Invalid protobuf, gzip, or IDs return 400. Unsupported content types or encodings return 415. Bodies above 32 MiB after decompression, or too large for one WAL record, return 413. Pressure returns 429 with `Retry-After: 1`. Storage failures return 503 and stop the receiver so supervision can recover it. Error bodies use protobuf `google.rpc.Status`.
+
+The receiver allows eight active uploads and ten seconds to read a body. Uploads retain their capacity through validation and durable completion, even after client disconnects. Admission stops after backlog exceeds 256 MiB or pending WAL frames would exceed 64 MiB. Backlog includes admitted frames waiting for fsync and uses a writer position sampled every 250 ms, so the estimate can temporarily overstate backlog. One request may cross the backlog threshold. Until a writer commits Parquet files, accepted uploads accumulate in the WAL.
+
+`GET /healthz` reports liveness, admitted `backlog`, and `sampled_physical_backlog`. Validation and pressure rejections are not appended. Clients may retry uploads whose acknowledgements were lost, so duplicates can exist after a disconnect or crash.
+
+Run `PYTHONPATH=src .venv/bin/pytest -q -s tests/test_edge.py tests/test_stack.py` for the exporter round trip, HTTP errors, pressure, and process crash checks.
+
 ## Inspect the local log
 
 `hopper.wal` stores original uploads in checksummed segments. An append returns a future that completes after the record and durable marker are synced. The default group commit syncs every 5 ms or 1 MiB. `Wal.open(data_dir, fsync="per-request")` syncs each record separately. On macOS, `full_fsync=True` also flushes the drive cache with `F_FULLFSYNC`.

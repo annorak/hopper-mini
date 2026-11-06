@@ -1,8 +1,11 @@
+import asyncio
 import base64
 import json
 from dataclasses import asdict
 from datetime import UTC, timedelta
+from enum import StrEnum
 from time import perf_counter
+from typing import Annotated
 
 import typer
 
@@ -13,6 +16,63 @@ from hopper.ledger import Ledger
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False)
 wal_app = typer.Typer(no_args_is_help=True, help="Inspect and prune the local write-ahead log.")
 app.add_typer(wal_app, name="wal")
+ingest_app = typer.Typer(no_args_is_help=True, help="Receive OTLP trace uploads.")
+stack_app = typer.Typer(no_args_is_help=True, help="Supervise the local receiver.")
+app.add_typer(ingest_app, name="ingest")
+app.add_typer(stack_app, name="stack")
+
+
+class FsyncMode(StrEnum):
+    group = "group"
+    per_request = "per-request"
+
+
+@ingest_app.command("serve")
+def ingest_serve(
+    fsync: Annotated[FsyncMode, typer.Option(help="WAL synchronization mode.")] = FsyncMode.group,
+    full_fsync: bool = typer.Option(False, help="Flush the drive cache with macOS F_FULLFSYNC."),
+) -> None:
+    """Run the local OTLP/HTTP receiver until interrupted."""
+    from hopper.edge import serve
+
+    try:
+        asyncio.run(serve(Settings.from_env(), fsync=fsync.value, full_fsync=full_fsync))
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+
+@stack_app.command("up")
+def stack_up() -> None:
+    """Start supervision and wait for the receiver to bind its listener."""
+    from hopper.stack import up
+
+    _stack_command(up)
+
+
+@stack_app.command("down")
+def stack_down() -> None:
+    """Stop supervision and drain the owned receiver."""
+    from hopper.stack import down
+
+    _stack_command(down)
+
+
+@stack_app.command("status")
+def stack_status() -> None:
+    """Print supervisor state and owned process IDs as JSON."""
+    from hopper.stack import status
+
+    _stack_command(status)
+
+
+def _stack_command(command) -> None:
+    try:
+        result = command(Settings.from_env())
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps(result))
 
 
 @wal_app.command("stat")
@@ -114,7 +174,7 @@ def _not_implemented(context: typer.Context) -> None:
 
 
 for name in (
-    "stack ingest writer verify sql trace find corpus tasks agent profile check replay "
+    "writer verify sql trace find corpus tasks agent profile check replay "
     "graders grade label bench chaos evals climb report"
 ).split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)

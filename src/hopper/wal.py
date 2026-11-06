@@ -375,6 +375,7 @@ class Wal:
             )
             with _locked(self._catalog.fileno()):
                 self._recover()
+            self._admitted_end = self._end
             self._worker = threading.Thread(target=self._run, name="hopper-wal", daemon=True)
             self._worker.start()
         except BaseException:
@@ -456,8 +457,15 @@ class Wal:
             self._queue.append(_Request(frame, future, time.monotonic()))
             self._pending_bytes += len(frame)
             self._pending_count += 1
+            self._admitted_end += len(frame)
             self._condition.notify()
             return future
+
+    @property
+    def admitted_end(self) -> int:
+        """The recovered end plus every successfully admitted frame, including pending writes."""
+        with self._condition:
+            return self._admitted_end
 
     def _take_batch(self) -> list[_Request]:
         with self._condition:

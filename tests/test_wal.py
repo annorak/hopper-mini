@@ -75,6 +75,37 @@ def test_exact_wire_format_and_opaque_gzip(tmp_path):
     assert stat(tmp_path).backlog == receipt.end
 
 
+def test_admitted_end_includes_pending_frames_and_recovers(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    real_sync = wal._sync
+    value = upload(b"pending")
+    size = len(frame(value))
+    monkeypatch.setattr(wal, "MAX_PENDING_BYTES", size)
+
+    def delayed_sync(fd, full_fsync):
+        if threading.current_thread().name == "hopper-wal":
+            entered.set()
+            assert release.wait(5)
+        real_sync(fd, full_fsync)
+
+    with Wal.open(tmp_path) as writer:
+        assert writer.admitted_end == 0
+        monkeypatch.setattr(wal, "_sync", delayed_sync)
+        receipt = writer.append(value)
+        try:
+            assert entered.wait(5)
+            assert not receipt.done()
+            assert writer.admitted_end == size
+            with pytest.raises(BufferError):
+                writer.append(value)
+            assert writer.admitted_end == size
+        finally:
+            release.set()
+        assert receipt.result(timeout=5).end == size
+    with Wal.open(tmp_path) as reopened:
+        assert reopened.admitted_end == size
+
+
 @pytest.mark.parametrize("mode", ["group", "per-request"])
 def test_concurrent_append_order_offsets_and_direct_seek(tmp_path, mode):
     with Wal.open(tmp_path, fsync=mode) as writer:

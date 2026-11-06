@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "A laptop-scale trace store for AI agents"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "aiohttp>=3.10",
     "duckdb>=2.0",
+    "googleapis-common-protos",
+    "opentelemetry-proto",
+    "protobuf",
     "pyarrow",
     "python-dotenv>=1.0",
     "pytz",
@@ -19,7 +23,12 @@ dependencies = [
 hopper = "hopper.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.11"]
+dev = [
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-sdk",
+    "pytest>=8",
+    "ruff>=0.11",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hopper"]
