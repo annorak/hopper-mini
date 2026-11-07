@@ -198,7 +198,9 @@ dependencies = [
     { name = "aiohttp" },
     { name = "duckdb" },
     { name = "googleapis-common-protos" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-proto" },
+    { name = "opentelemetry-sdk" },
     { name = "pillow" },
     { name = "protobuf" },
     { name = "pyarrow" },
@@ -210,8 +212,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -221,7 +221,9 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.10" },
     { name = "duckdb", specifier = ">=2.0" },
     { name = "googleapis-common-protos" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-proto" },
+    { name = "opentelemetry-sdk" },
     { name = "pillow", specifier = "==12.0.0" },
     { name = "protobuf" },
     { name = "pyarrow" },
@@ -233,8 +235,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.11" },
 ]

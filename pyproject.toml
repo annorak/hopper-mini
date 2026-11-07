@@ -12,6 +12,8 @@ dependencies = [
     "duckdb>=2.0",
     "googleapis-common-protos",
     "opentelemetry-proto",
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-sdk",
     "protobuf",
     "pyarrow",
     "python-dotenv>=1.0",
@@ -26,8 +28,6 @@ hopper = "hopper.cli:app"
 
 [dependency-groups]
 dev = [
-    "opentelemetry-exporter-otlp-proto-http",
-    "opentelemetry-sdk",
     "pytest>=8",
     "ruff>=0.11",
 ]

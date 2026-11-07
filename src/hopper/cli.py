@@ -28,6 +28,8 @@ corpus_app = typer.Typer(no_args_is_help=True, help="Build and read the Bayview 
 tasks_app = typer.Typer(no_args_is_help=True, help="Draft and validate the fixed RFI dataset.")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(tasks_app, name="tasks")
+agent_app = typer.Typer(no_args_is_help=True, help="Run RFIs and emit GenAI traces.")
+app.add_typer(agent_app, name="agent")
 
 
 class FsyncMode(StrEnum):
@@ -272,8 +274,72 @@ def find_query(
     _print_query(result, as_json=as_json)
 
 
-for name in "agent profile check replay graders grade label bench chaos evals climb report".split():
+for name in "profile check replay graders grade label bench chaos evals climb report".split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
+
+
+@agent_app.command("run")
+def agent_run(
+    task: Annotated[str, typer.Option(help="Task ID, such as RFI-001.")],
+    repeat: Annotated[
+        int, typer.Option(min=0, help="Repeat number for deterministic tool faults.")
+    ] = 0,
+    dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET,
+    config: Annotated[Path | None, typer.Option(help="Agent baseline JSON.")] = None,
+) -> None:
+    """Run one RFI and print its answer, trace ID, and actual cost as JSON."""
+    from hopper.agent import DEFAULT_BASELINE, Agent, Task
+    from hopper.tasks import load_tasks
+
+    try:
+        record = next((row for row in load_tasks(dataset) if row["id"] == task), None)
+        if record is None:
+            raise ValueError(f"Unknown task: {task}")
+        result = Agent(Settings.from_env(), config or DEFAULT_BASELINE).run(
+            Task.from_record(record), repeat
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps(asdict(result), ensure_ascii=False))
+    if result.error or result.answer is None:
+        raise typer.Exit(1)
+
+
+@agent_app.command("batch")
+def agent_batch(
+    limit: Annotated[int, typer.Option(min=1, help="Maximum tasks in dataset order.")] = 150,
+    repeats: Annotated[int, typer.Option(min=1)] = 1,
+    followups: Annotated[bool, typer.Option("--followups/--no-followups")] = True,
+    dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET,
+    config: Annotated[Path | None, typer.Option(help="Agent baseline JSON.")] = None,
+) -> None:
+    """Print each turn and a batch summary, including follow-ups and settled/held cost."""
+    from hopper.agent import DEFAULT_BASELINE, Agent, Task
+    from hopper.tasks import load_tasks
+
+    def report(result):
+        typer.echo(json.dumps({"event": "run", **asdict(result)}, ensure_ascii=False))
+
+    try:
+        tasks = [Task.from_record(record) for record in load_tasks(dataset)[:limit]]
+        summary = Agent(Settings.from_env(), config or DEFAULT_BASELINE).batch(
+            tasks, repeats, followups=followups, progress=report
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(
+        json.dumps(
+            {"event": "batch", **{key: value for key, value in summary.items() if key != "results"}}
+        )
+    )
+    if (
+        summary["without_answer_rate"] >= 0.05
+        or summary["held_usd"] != "0"
+        or summary["export_failures"]
+    ):
+        raise typer.Exit(1)
 
 
 @corpus_app.command("build")

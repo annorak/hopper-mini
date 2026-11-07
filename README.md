@@ -248,3 +248,59 @@ stays in the environment or `.env` and is never stored in a receipt.
 
 Corpus builds, searches, validation, and selfchecks do not generate tasks or call a model.
 The trace-based `hopper check` command belongs to the later agent milestone.
+
+## Run the RFI agent
+
+Build the corpus and start the trace receiver and writer before running the agent.
+Set `ANTHROPIC_API_KEY` in your environment or `.env`.
+
+```sh
+uv run hopper corpus build
+uv run hopper stack up
+uv run hopper agent run --task RFI-001
+uv run hopper trace <trace-id> --full
+uv run hopper agent batch --limit 25 --repeats 2
+uv run hopper spend
+```
+
+`run` prints JSON containing the answer, trace ID, conversation ID, settled cost,
+held cost, and elapsed seconds. A failed run prints its trace ID and error and exits
+nonzero. The writer publishes exported spans within about two seconds.
+
+`batch` runs up to four conversations concurrently. It prints one JSON line per
+turn and a final summary with base and follow-up counts, missing answers, and cost.
+It selects tasks in dataset order. The first 25 are lookup tasks. Use RFI-076 for
+a drawing conflict and RFI-126 for a calculation. Each repeat uses deterministic
+tool faults. Twenty percent of conversations are selected by a stable hash for
+one or two follow-up questions. They get new trace IDs and retain the conversation
+ID and prior question/answer history. `--no-followups` disables these extra turns.
+Interrupting a batch cancels queued conversations and stops active conversations
+before their next model request. Requests already in flight can still settle.
+
+Every paid request uses the existing spend ledger and `HOPPER_SPEND_CAP_USD`.
+Unknown provider outcomes retain their reservations and are not automatically
+retried. The batch exits nonzero when at least 5% of attempted turns have no answer,
+any reservation remains held, or an answer's trace could not be exported.
+
+`agents/rfi/baseline.json` holds the shared and stage prompts, seven tool
+descriptions, research step cap, and effort. `--config <path>` selects another
+baseline. The model is `claude-haiku-5-5` with summarized adaptive thinking and
+16,000 maximum output tokens. Triage makes one call, research makes at most eight
+calls with one tool per call, and the writer makes one call to `submit_answer`.
+Refusals and output-token exhaustion end the turn without an answer. Task answer
+keys, gold answers, and planted corpus cases are never sent to the model.
+
+The research tools are `search_documents`, `read_section`, `list_addenda`,
+`read_drawing`, `calculate`, and `report_findings`. Findings that cite drawings
+require a successful `read_drawing` in that turn. The model receives the PNG;
+trace messages and tool results retain only `corpus://drawings/<id>.png` URI parts.
+All content attributes are JSON strings. Each turn owns a private SDK provider
+with task/version resource attributes, a default batch processor, and a gzip
+OTLP/HTTP exporter to `HOPPER_ENDPOINT`. Export rejection is reported as an error.
+
+`calculate` supports numeric assignments, arithmetic, numeric `print`, and named
+math functions such as `sqrt` and `round`. It interprets a bounded syntax tree in
+isolated Python under macOS `sandbox-exec`, which denies networking and file
+writes. Imports, attributes, indexing, loops, and custom functions are rejected.
+The parent kills and reaps a worker after two seconds. Platforms without this
+sandbox fail closed.
