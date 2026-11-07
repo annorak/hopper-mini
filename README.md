@@ -69,7 +69,7 @@ hopper ingest serve --full-fsync
 
 `--full-fsync` uses macOS `F_FULLFSYNC`. The default uses group commit. `HOPPER_ENDPOINT` defaults to `http://127.0.0.1:4318` and must be an HTTP loopback origin.
 
-To run the receiver under local supervision, use:
+To run the receiver and writer under local supervision, use:
 
 ```sh
 hopper stack up
@@ -77,7 +77,7 @@ hopper stack status
 hopper stack down
 ```
 
-These commands print JSON. `up` waits for its receiver to open the WAL and bind the listener. A failed first start cleans up the supervisor. After a successful start, the supervisor restarts a crashed receiver with a retry delay capped at one second. `down` stops restarts and gives the owned receiver five seconds to drain before sending SIGKILL. If the supervisor dies, its receiver detects the closed parent connection and drains. Logs are in `$HOPPER_DATA_DIR/.stack/supervisor.log`.
+These commands print JSON with `receiver_pid` and `writer_pid`. `up` waits for both children to become ready. A failed first start cleans up the supervisor. After startup, each crashed child restarts independently with a retry delay capped at one second. `down` first drains the receiver, then the writer, with five seconds per child before SIGKILL. Each child also drains when its parent connection closes. Logs are in `$HOPPER_DATA_DIR/.stack/supervisor.log`.
 
 Send `POST /v1/traces` with `Content-Type: application/x-protobuf` and optional `Content-Encoding: gzip`. The receiver keeps the original body, including gzip bytes. HTTP 200 contains an empty `ExportTraceServiceResponse` and follows the WAL's durable receipt. Empty protobuf requests are valid. Each span needs a 16-byte trace ID and an 8-byte span ID.
 
@@ -117,3 +117,36 @@ PYTHONPATH=src .venv/bin/python benchmarks/bench_wal.py --full-fsync --profile
 The benchmark alternates five trials per mode using 64-byte bodies. It prints records per second, p50 and p99 append-to-completion latency observed by callbacks, verified records, errors, and median and range summaries. Each trial reads every record back and checks its payload, offsets, and per-writer order. `--profile` adds separate diagnostic trials that count and time real synchronization calls. Those diagnostic trials do not contribute to the throughput summary. Results describe this local WAL path, not receiver throughput or power-loss testing.
 
 Run `HOPPER_WAL_MILLION=1 PYTHONPATH=src .venv/bin/pytest -q tests/test_wal.py::test_million_individual_concurrent_records_with_real_fsync` for the million-record concurrency and readback acceptance test. Normal test runs skip this larger case.
+
+## Write and verify spans
+
+With the receiver running, start a standalone writer in another terminal:
+
+```sh
+hopper writer run
+```
+
+The writer publishes complete durable WAL records every two seconds or 20,000 decoded spans. One upload stays together even if it exceeds that threshold. Files use the explicit spans schema and zstd level 3. Each flush syncs its temporary file, renames it to `spans/<start>-<end>.parquet`, and syncs the spans directory. Empty and duplicate-only batches publish zero-row files to record progress.
+
+The `kind` and `status` columns use known enum names such as `CLIENT` and `ERROR`. Unknown enum integers remain decimal strings such as `"99"` or `"-99"`.
+
+Duplicate filtering uses WAL receipt time, including during backlog recovery. A retry less than ten minutes after the accepted copy is dropped without refreshing its expiry. At ten minutes, the identity may be accepted again. Receipt timestamps are assumed to move forward. Restart loads recent accepted identities from committed files and removes only `tmp/writer-*.parquet`. One writer owns the data directory at a time.
+
+Stop producers and drain the stack, then compare stored spans with the retained log:
+
+```sh
+hopper stack down
+hopper verify
+```
+
+`verify` prints counts and bounded diagnostics as JSON and exits nonzero for pending, missing, unexpected, or unequal spans. It independently decodes all schema fields and fails on duplicate identities. A retry accepted outside ten minutes therefore fails this global exactly-once check. Verification also works on a live finite snapshot, which can report pending uploads. After WAL pruning, originals before the retained offset can justify a suppressed retry, but their original payloads cannot be checked.
+
+Run `PYTHONPATH=src .venv/bin/pytest -q -s tests/test_writer.py tests/test_stack.py` for schema, duplicate-window, retained-log, and real SIGKILL recovery checks.
+
+Run the SDK field comparison and five 20-second trials at 1,000 rich spans per second:
+
+```sh
+PYTHONPATH=src uv run python benchmarks/bench_writer.py --keep-data
+```
+
+The script compares 10,000 three-span traces with the SDK's original fields, repeats a captured upload across a writer restart, and measures acknowledgment to completed DuckDB query. It reports every trial's counts, errors, achieved rate, and latency. `--keep-data` retains the printed data folders for `HOPPER_DATA_DIR=<folder> uv run hopper verify`. The separate SIGKILL tests above stop the writer at known publication boundaries.

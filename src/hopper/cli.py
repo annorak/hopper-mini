@@ -17,9 +17,11 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_
 wal_app = typer.Typer(no_args_is_help=True, help="Inspect and prune the local write-ahead log.")
 app.add_typer(wal_app, name="wal")
 ingest_app = typer.Typer(no_args_is_help=True, help="Receive OTLP trace uploads.")
-stack_app = typer.Typer(no_args_is_help=True, help="Supervise the local receiver.")
+stack_app = typer.Typer(no_args_is_help=True, help="Supervise the local receiver and writer.")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(stack_app, name="stack")
+writer_app = typer.Typer(no_args_is_help=True, help="Publish durable uploads as Parquet.")
+app.add_typer(writer_app, name="writer")
 
 
 class FsyncMode(StrEnum):
@@ -44,7 +46,7 @@ def ingest_serve(
 
 @stack_app.command("up")
 def stack_up() -> None:
-    """Start supervision and wait for the receiver to bind its listener."""
+    """Start supervision and wait for receiver and writer readiness."""
     from hopper.stack import up
 
     _stack_command(up)
@@ -52,7 +54,7 @@ def stack_up() -> None:
 
 @stack_app.command("down")
 def stack_down() -> None:
-    """Stop supervision and drain the owned receiver."""
+    """Stop supervision and drain the receiver, then the writer."""
     from hopper.stack import down
 
     _stack_command(down)
@@ -174,7 +176,34 @@ def _not_implemented(context: typer.Context) -> None:
 
 
 for name in (
-    "writer verify sql trace find corpus tasks agent profile check replay "
+    "sql trace find corpus tasks agent profile check replay "
     "graders grade label bench chaos evals climb report"
 ).split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
+
+
+@writer_app.command("run")
+def writer_run() -> None:
+    """Consume durable uploads until interrupted, then drain the final snapshot."""
+    from hopper.writer import run
+
+    try:
+        asyncio.run(run(Settings.from_env()))
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+
+@app.command("verify")
+def verify_spans() -> None:
+    """Compare retained uploads with stored spans and report pending data."""
+    from hopper.verify import verify
+
+    try:
+        result = verify(Settings.from_env().data_dir)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(result.render())
+    if not result.ok:
+        raise typer.Exit(1)

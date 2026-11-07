@@ -346,3 +346,44 @@ def test_foreground_cli_stops_and_recovers(settings, flags):
                 child.wait(timeout=5)
         assert child.returncode == 0, (settings.data_dir / "foreground.log").read_text()
     assert recovered(settings) == [acknowledged]
+
+
+def test_sigkill_writer_restarts_without_restarting_receiver(settings):
+    first = command(settings, "stack", "up")
+    send(settings, "writer restart")
+    os.kill(first["writer_pid"], signal.SIGKILL)
+
+    def restarted():
+        current = stack.status(settings)
+        return (
+            current
+            if current["phase"] == "running" and current["writer_pid"] != first["writer_pid"]
+            else None
+        )
+
+    second = wait_for(restarted)
+    assert second["receiver_pid"] == first["receiver_pid"]
+    assert second["supervisor_pid"] == first["supervisor_pid"]
+    command(settings, "stack", "down")
+    result = cli(settings, "verify")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["actual_spans"] == 1
+
+
+def test_up_waits_for_old_writer_to_release_ownership(settings):
+    from hopper.writer import Writer
+
+    with wal.Wal.open(settings.data_dir):
+        pass
+    writer = Writer(settings.data_dir)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            startup = pool.submit(command, settings, "stack", "up")
+            wait_for(lambda: "writer already owns" in (stack.status(settings)["error"] or ""))
+            assert not startup.done()
+            writer.close()
+            writer = None
+            assert startup.result(timeout=20)["phase"] == "running"
+    finally:
+        if writer is not None:
+            writer.close()

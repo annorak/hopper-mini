@@ -58,6 +58,7 @@ def status(settings: Settings) -> dict:
             "phase": "starting" if _locked(settings.data_dir) else "stopped",
             "supervisor_pid": None,
             "receiver_pid": None,
+            "writer_pid": None,
             "error": None,
         }
 
@@ -75,7 +76,7 @@ def up(settings: Settings) -> dict:
             result = status(settings)
             if exit_code != 0 and result["phase"] == "stopped":
                 raise RuntimeError(
-                    failure or f"Receiver failed to start; see {directory / 'supervisor.log'}"
+                    failure or f"Stack failed to start; see {directory / 'supervisor.log'}"
                 )
             candidate = None
         if result["phase"] == "running":
@@ -106,7 +107,7 @@ def up(settings: Settings) -> dict:
         except subprocess.TimeoutExpired:
             candidate.kill()
             candidate.wait(timeout=STOP_SECONDS)
-    raise RuntimeError(f"Receiver startup timed out; see {directory / 'supervisor.log'}")
+    raise RuntimeError(f"Stack startup timed out; see {directory / 'supervisor.log'}")
 
 
 def down(settings: Settings) -> dict:
@@ -130,14 +131,20 @@ class Supervisor:
         self.settings = settings
         self.stop = asyncio.Event()
         self.phase = "starting"
-        self.child: subprocess.Popen | None = None
+        self.children: dict[str, subprocess.Popen | None] = {"receiver": None, "writer": None}
+        self.ready = {"receiver": False, "writer": False}
+        self.receiver_ready = asyncio.Event()
+        self.writer_stop = asyncio.Event()
         self.error: str | None = None
 
     def snapshot(self) -> dict:
         return {
             "phase": self.phase,
             "supervisor_pid": os.getpid(),
-            "receiver_pid": self.child.pid if self.child is not None else None,
+            **{
+                f"{role}_pid": child.pid if child is not None else None
+                for role, child in self.children.items()
+            },
             "error": self.error,
         }
 
@@ -159,28 +166,28 @@ class Supervisor:
             with suppress(OSError):
                 await writer.wait_closed()
 
-    async def stop_child(self) -> None:
-        if self.child is None:
+    async def stop_child(self, role: str) -> None:
+        if self.children[role] is None:
             return
-        if self.child.poll() is None:
+        if self.children[role].poll() is None:
             with suppress(ProcessLookupError):
-                self.child.terminate()
+                self.children[role].terminate()
         try:
-            await asyncio.to_thread(self.child.wait, timeout=STOP_SECONDS)
+            await asyncio.to_thread(self.children[role].wait, timeout=STOP_SECONDS)
         except subprocess.TimeoutExpired:
-            self.child.kill()
-            await asyncio.to_thread(self.child.wait, timeout=STOP_SECONDS)
-        self.child = None
+            self.children[role].kill()
+            await asyncio.to_thread(self.children[role].wait, timeout=STOP_SECONDS)
+        self.children[role] = None
 
-    async def run_children(self) -> None:
+    async def run_child(self, role: str, stop: asyncio.Event) -> None:
         loop = asyncio.get_running_loop()
         has_run = False
         failures = 0
         initial_deadline = loop.time() + START_SECONDS + STOP_SECONDS
-        while not self.stop.is_set():
+        while not stop.is_set():
             parent, child = socket.socketpair()
             parent.setblocking(False)
-            stopped = asyncio.create_task(self.stop.wait())
+            stopped = asyncio.create_task(stop.wait())
             ready = None
             can_retry_startup = False
             try:
@@ -190,8 +197,12 @@ class Supervisor:
                     "HOPPER_ENDPOINT": self.settings.endpoint,
                     "HOPPER_PARENT_FD": str(child.fileno()),
                 }
-                self.child = subprocess.Popen(
-                    [sys.executable, "-m", "hopper.edge"],
+                self.children[role] = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "hopper.edge" if role == "receiver" else "hopper.writer",
+                    ],
                     env=env,
                     stdin=subprocess.DEVNULL,
                     close_fds=True,
@@ -204,29 +215,35 @@ class Supervisor:
                     timeout=START_SECONDS if has_run else max(0, initial_deadline - loop.time()),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if self.stop.is_set():
+                if stop.is_set():
                     break
                 if ready not in done:
-                    raise RuntimeError("Receiver timed out before readiness")
+                    raise RuntimeError(f"{role} timed out before readiness")
                 if ready.result() != b"ready\n":
                     kind, _, message = ready.result().partition(b" ")
-                    can_retry_startup = kind == b"wal-busy" and loop.time() < initial_deadline
+                    can_retry_startup = (
+                        kind in (b"wal-busy", b"writer-busy") and loop.time() < initial_deadline
+                    )
                     raise RuntimeError(
                         message.decode(errors="replace").strip()
-                        or "Receiver exited before readiness"
+                        or f"{role} exited before readiness"
                     )
-                self.phase = "running"
+                self.ready[role] = True
+                if role == "receiver":
+                    self.receiver_ready.set()
+                self.phase = "running" if all(self.ready.values()) else "starting"
                 self.error = None
                 has_run = True
                 started = loop.time()
-                while self.child.poll() is None and not self.stop.is_set():
+                while self.children[role].poll() is None and not stop.is_set():
                     await asyncio.wait([stopped], timeout=POLL_SECONDS)
-                self.phase = "stopping" if self.stop.is_set() else "restarting"
+                self.phase = "stopping" if stop.is_set() else "restarting"
                 if loop.time() - started >= 1:
                     failures = 0
             except (OSError, RuntimeError) as error:
                 self.error = str(error)
             finally:
+                self.ready[role] = False
                 child.close()
                 parent.close()
                 stopped.cancel()
@@ -235,17 +252,44 @@ class Supervisor:
                 await asyncio.gather(
                     stopped, *([ready] if ready is not None else []), return_exceptions=True
                 )
-                await self.stop_child()
+                await self.stop_child(role)
             if not has_run and not can_retry_startup:
-                raise RuntimeError(self.error or "Receiver stopped before readiness")
-            if not self.stop.is_set():
+                raise RuntimeError(self.error or f"{role} stopped before readiness")
+            if not stop.is_set():
                 self.phase = "restarting" if has_run else "starting"
                 failures += 1
                 delay = min(0.1 * 2 ** min(failures - 1, 4), 1)
                 if not has_run:
                     delay = min(delay, max(0, initial_deadline - loop.time()))
                 with suppress(TimeoutError):
-                    await asyncio.wait_for(self.stop.wait(), delay)
+                    await asyncio.wait_for(stop.wait(), delay)
+
+    async def run_children(self) -> None:
+        receiver = asyncio.create_task(self.run_child("receiver", self.stop))
+        ready = asyncio.create_task(self.receiver_ready.wait())
+        writer = None
+        stopped = asyncio.create_task(self.stop.wait())
+        try:
+            await asyncio.wait([receiver, ready], return_when=asyncio.FIRST_COMPLETED)
+            if receiver.done():
+                await receiver
+                return
+            writer = asyncio.create_task(self.run_child("writer", self.writer_stop))
+            done, _ = await asyncio.wait(
+                [receiver, writer, stopped], return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                await task
+        finally:
+            self.phase = "stopping"
+            self.stop.set()
+            await asyncio.gather(receiver, return_exceptions=True)
+            self.writer_stop.set()
+            if writer is not None:
+                await asyncio.gather(writer, return_exceptions=True)
+            ready.cancel()
+            stopped.cancel()
+            await asyncio.gather(ready, stopped, return_exceptions=True)
 
 
 async def supervise(settings: Settings) -> None:
@@ -269,7 +313,8 @@ async def supervise(settings: Settings) -> None:
                 await supervisor.run_children()
         finally:
             supervisor.stop.set()
-            await supervisor.stop_child()
+            await supervisor.stop_child("receiver")
+            await supervisor.stop_child("writer")
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(sig)
             path.unlink(missing_ok=True)
