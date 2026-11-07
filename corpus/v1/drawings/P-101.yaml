@@ -1,0 +1,30 @@
+{
+  "id": "P-101",
+  "title": "Plumbing and valve-room drainage",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The planned daily sump pump-out event count is 9. Use this frequency with the event volume for the normal daily drainage estimate."
+    },
+    {
+      "number": 2,
+      "text": "Provide a visible air gap at each equipment condensate drain discharge. Keep the gap clear of stored maintenance material."
+    },
+    {
+      "number": 3,
+      "text": "Hold the washwater backflow assembly pending the engineer of record device selection after utility review."
+    },
+    {
+      "number": 4,
+      "text": "Prime floor-drain traps before the ventilation acceptance run. Keep cleanout covers visible after final equipment installation."
+    },
+    {
+      "number": 5,
+      "text": "Flush new drains with clean water and observe the intended outlet. Capture construction residue before it enters a retained drain."
+    },
+    {
+      "number": 6,
+      "text": "Keep coating waste, oil, and used absorbents out of the building sump. Dispose of those materials through the contractor controlled waste route."
+    }
+  ]
+}

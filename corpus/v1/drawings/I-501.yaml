@@ -1,0 +1,30 @@
+{
+  "id": "I-501",
+  "title": "Instrument loop and terminal details",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The measured level-transmitter cable route length is 85 m. The route length excludes the service allowance in the instrument specification."
+    },
+    {
+      "number": 2,
+      "text": "Use the same instrument tag at the field device, junction box, panel terminal, and controller point. Report tag mismatches before loop testing."
+    },
+    {
+      "number": 3,
+      "text": "Test the complete analog signal path using a calibrated source. Record field input and controller indication on the same loop sheet."
+    },
+    {
+      "number": 4,
+      "text": "Keep spare terminals labeled and fitted with end stops. Do not use a spare terminal as an unrecorded junction for a revised loop."
+    },
+    {
+      "number": 5,
+      "text": "Disconnect sensitive electronics before cable insulation testing. Reconnect and complete the loop check after the test."
+    },
+    {
+      "number": 6,
+      "text": "Verify the loss-of-signal alarm by opening the field signal path under the commissioning procedure. Restore the loop and confirm normal indication before leaving the test."
+    }
+  ]
+}

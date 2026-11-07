@@ -1,0 +1,30 @@
+{
+  "id": "E-601",
+  "title": "Single-line diagram and drive schedule",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The auxiliary feeder scheduled operating current is 72 A. The schedule represents the permanent auxiliary loads in the normal operating configuration."
+    },
+    {
+      "number": 2,
+      "text": "The installed pump-drive count is 3. Each permanent pump has a dedicated drive."
+    },
+    {
+      "number": 3,
+      "text": "Provide the shelf spare drive in accordance with the motor-control specification. Do not connect the spare to the operating distribution."
+    },
+    {
+      "number": 4,
+      "text": "Label each drive isolator with the pump tag and its source panel. The label remains visible with the panel door closed."
+    },
+    {
+      "number": 5,
+      "text": "Coordinate protective-device settings with the accepted cable and motor data. Put the final settings sheet in the panel document pocket."
+    },
+    {
+      "number": 6,
+      "text": "Provide an individual lockout point for each pump drive. A local control selector does not provide electrical isolation."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "id": "E-101",
+  "title": "Electrical distribution and raceway plan",
+  "notes": [
+    {
+      "number": 1,
+      "text": "Exposed raceway in the wet well shall be PVC conduit. Route the raceway above the maintenance platform where the layout permits."
+    },
+    {
+      "number": 2,
+      "text": "The control-building diversified demand is 16 kW. Carry this demand as a separate entry from the process feeder allowance."
+    },
+    {
+      "number": 3,
+      "text": "Separate instrument raceways from drive output raceways. Cross at a right angle where the coordinated route requires an intersection."
+    },
+    {
+      "number": 4,
+      "text": "Retain the utility metering cabinet. The owner and utility control isolation at the existing service entry."
+    },
+    {
+      "number": 5,
+      "text": "Bond new metallic equipment to the station grounding system. Keep bonding points accessible for inspection before cable covers are closed."
+    },
+    {
+      "number": 6,
+      "text": "Verify motor rotation with the pump supplier present. Do not infer rotation from phase identification alone."
+    }
+  ]
+}

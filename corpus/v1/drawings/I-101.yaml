@@ -1,0 +1,30 @@
+{
+  "id": "I-101",
+  "title": "Instrumentation plan and alarm points",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The primary wet-well level transmitter shall use ultrasonic sensing. Mount the device clear of the incoming jet."
+    },
+    {
+      "number": 2,
+      "text": "The local alarm horn delay is 3 seconds. Apply this delay after the common alarm debounce in the commissioning response test path."
+    },
+    {
+      "number": 3,
+      "text": "The high-high alarm elevation requires the engineer of record decision. Do not copy the normal pump-control level into that alarm field."
+    },
+    {
+      "number": 4,
+      "text": "Use separate instrument isolation points where a pressure device must be removed from a live process connection."
+    },
+    {
+      "number": 5,
+      "text": "Terminate cable shields in accordance with the accepted instrument loop drawing. Keep shields clear of field device protective-earth terminals unless the loop drawing connects them."
+    },
+    {
+      "number": 6,
+      "text": "Leave remote-restart recovery logic pending the engineer of record policy decision. Local automatic level control remains available during a communications fault."
+    }
+  ]
+}

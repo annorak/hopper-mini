@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import UTC, timedelta
 from enum import StrEnum
+from pathlib import Path
 from time import perf_counter
 from typing import Annotated
 
@@ -12,6 +13,7 @@ import typer
 from hopper import wal
 from hopper.config import DATA_DIRECTORIES, Settings
 from hopper.ledger import Ledger
+from hopper.tasks import DEFAULT_DATASET
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False)
 wal_app = typer.Typer(no_args_is_help=True, help="Inspect and prune the local write-ahead log.")
@@ -22,6 +24,10 @@ app.add_typer(ingest_app, name="ingest")
 app.add_typer(stack_app, name="stack")
 writer_app = typer.Typer(no_args_is_help=True, help="Publish durable uploads as Parquet.")
 app.add_typer(writer_app, name="writer")
+corpus_app = typer.Typer(no_args_is_help=True, help="Build and read the Bayview source documents.")
+tasks_app = typer.Typer(no_args_is_help=True, help="Draft and validate the fixed RFI dataset.")
+app.add_typer(corpus_app, name="corpus")
+app.add_typer(tasks_app, name="tasks")
 
 
 class FsyncMode(StrEnum):
@@ -266,10 +272,107 @@ def find_query(
     _print_query(result, as_json=as_json)
 
 
-for name in (
-    "corpus tasks agent profile check replay graders grade label bench chaos evals climb report"
-).split():
+for name in "agent profile check replay graders grade label bench chaos evals climb report".split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
+
+
+@corpus_app.command("build")
+def corpus_build() -> None:
+    """Render the source drawing notes and print corpus counts and version."""
+    from hopper.corpus import build_corpus
+
+    started = perf_counter()
+    try:
+        result = build_corpus(Settings.from_env().data_dir)
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps({**result, "elapsed_seconds": round(perf_counter() - started, 3)}))
+
+
+@corpus_app.command("show")
+def corpus_show(identifier: Annotated[str | None, typer.Argument()] = None) -> None:
+    """List document IDs, or print a document, section, drawing note, or addendum item."""
+    from hopper.corpus import load_corpus
+
+    try:
+        corpus = load_corpus()
+        if identifier is None:
+            text = "\n".join(sorted(corpus.documents))
+        elif identifier in corpus.sections:
+            section = corpus.sections[identifier]
+            text = f"{section.id} {section.title}\n\n{section.text}"
+        elif identifier in corpus.documents:
+            text = corpus.documents[identifier]
+        else:
+            raise ValueError(f"Unknown document or section: {identifier}")
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(text)
+
+
+@corpus_app.command("search")
+def corpus_search(query: str, limit: int = typer.Option(10, min=1, max=100)) -> None:
+    """Search spec sections, drawing notes, and addendum items with BM25."""
+    from hopper.corpus import load_corpus, search_corpus
+
+    started = perf_counter()
+    try:
+        results = search_corpus(load_corpus(), query, limit)
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    for result in results:
+        typer.echo(json.dumps(result))
+    typer.echo(f"{len(results)} results; {perf_counter() - started:.3f}s")
+
+
+@tasks_app.command("generate")
+def tasks_generate(dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET) -> None:
+    """Draft missing fixed RFIs through the spend ledger, or reuse a valid dataset."""
+    from hopper.generation import generate_tasks
+
+    started = perf_counter()
+    try:
+        result = generate_tasks(Settings.from_env(), dataset)
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps({**result, "elapsed_seconds": round(perf_counter() - started, 3)}))
+
+
+@tasks_app.command("validate")
+def tasks_validate(dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET) -> None:
+    """Validate all task keys, source references, provenance, and gold answers."""
+    from hopper.corpus import load_corpus
+    from hopper.tasks import load_tasks, validate_tasks
+
+    started = perf_counter()
+    try:
+        result = validate_tasks(load_tasks(dataset), load_corpus())
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps({**result, "elapsed_seconds": round(perf_counter() - started, 3)}))
+    if result["error_count"]:
+        raise typer.Exit(1)
+
+
+@tasks_app.command("selfcheck")
+def tasks_selfcheck(dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET) -> None:
+    """Pass every committed gold answer through the pure answer-key checker."""
+    from hopper.tasks import load_tasks, selfcheck_tasks
+
+    started = perf_counter()
+    try:
+        result = selfcheck_tasks(load_tasks(dataset))
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps({**result, "elapsed_seconds": round(perf_counter() - started, 3)}))
+    if result["failing"] or not result["passing"]:
+        raise typer.Exit(1)
 
 
 @writer_app.command("run")

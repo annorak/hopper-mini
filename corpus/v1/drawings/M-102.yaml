@@ -1,0 +1,30 @@
+{
+  "id": "M-102",
+  "title": "Pressure-main tie-in and retained spool",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The retained downstream pipe length is 28 m. This length remains within the full discharge route after the new work is complete."
+    },
+    {
+      "number": 2,
+      "text": "Expose and measure the retained flange before spool fabrication. Keep the existing pressure main operational until the approved tie-in outage."
+    },
+    {
+      "number": 3,
+      "text": "The legacy-flange gasket remains subject to the engineer of record elastomer selection. Do not apply the new-pipe gasket schedule to that flange."
+    },
+    {
+      "number": 4,
+      "text": "Mark the field cut line only after the new spool dimensions have been checked against the actual retained connection."
+    },
+    {
+      "number": 5,
+      "text": "Keep the pressure-main vent accessible during filling and hydrostatic testing. Close it after trapped air has been removed."
+    },
+    {
+      "number": 6,
+      "text": "Inspect the retained flange face after cleaning. Report cracks, section loss, or bolt-hole damage before attempting the permanent connection."
+    }
+  ]
+}

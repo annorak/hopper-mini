@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pytz",
     "typer>=0.15",
+    "pillow==12.0.0",
 ]
 
 [project.scripts]

@@ -1,0 +1,713 @@
+{
+  "precedence": "SPEC-01/1.2",
+  "conflicts": [
+    {
+      "id": "CONFLICT-01",
+      "topic": "pump discharge isolation valve",
+      "spec": "SPEC-07/2.1",
+      "drawing": "M-101/1",
+      "spec_quote": "The valve on each pump discharge shall be a butterfly valve.",
+      "drawing_quote": "The valve on each pump discharge shall be a gate valve.",
+      "resolution_quote": "The valve on each pump discharge shall be a butterfly valve."
+    },
+    {
+      "id": "CONFLICT-02",
+      "topic": "pressure-main bedding material",
+      "spec": "SPEC-03/2.1",
+      "drawing": "C-101/1",
+      "spec_quote": "Bedding under the pressure main shall be washed angular aggregate.",
+      "drawing_quote": "Bedding under the pressure main shall be excavated native soil.",
+      "resolution_quote": "Bedding under the pressure main shall be washed angular aggregate."
+    },
+    {
+      "id": "CONFLICT-03",
+      "topic": "wet-well hatch cover material",
+      "spec": "SPEC-06/2.2",
+      "drawing": "S-101/1",
+      "spec_quote": "The wet-well access hatch cover shall be aluminum.",
+      "drawing_quote": "The wet-well access hatch cover shall be galvanized steel.",
+      "resolution_quote": "The wet-well access hatch cover shall be aluminum."
+    },
+    {
+      "id": "CONFLICT-04",
+      "topic": "wet-well exposed raceway material",
+      "spec": "SPEC-10/2.2",
+      "drawing": "E-101/1",
+      "spec_quote": "Exposed raceway in the wet well shall be PVC-coated rigid steel conduit.",
+      "drawing_quote": "Exposed raceway in the wet well shall be PVC conduit.",
+      "resolution_quote": "Exposed raceway in the wet well shall be PVC-coated rigid steel conduit."
+    },
+    {
+      "id": "CONFLICT-05",
+      "topic": "primary level measurement technology",
+      "spec": "SPEC-12/2.1",
+      "drawing": "I-101/1",
+      "spec_quote": "The primary wet-well level transmitter shall use radar sensing.",
+      "drawing_quote": "The primary wet-well level transmitter shall use ultrasonic sensing.",
+      "resolution_quote": "The primary wet-well level transmitter shall use radar sensing."
+    },
+    {
+      "id": "CONFLICT-06",
+      "topic": "control-room supply-air filtration",
+      "spec": "SPEC-14/2.2",
+      "drawing": "H-101/1",
+      "spec_quote": "Control-room supply-air filters shall be MERV 13.",
+      "drawing_quote": "Control-room supply-air filters shall be MERV 8.",
+      "resolution_quote": "Control-room supply-air filters shall be MERV 13."
+    }
+  ],
+  "changes": [
+    {
+      "id": "ADD-1/1",
+      "section": "SPEC-02/1.2",
+      "topic": "planned station outage",
+      "before": "The maximum planned station outage is 6 hours.",
+      "after": "The maximum planned station outage is 4 hours."
+    },
+    {
+      "id": "ADD-1/2",
+      "section": "SPEC-05/2.1",
+      "topic": "foundation concrete strength",
+      "before": "The specified foundation concrete strength is 35 MPa.",
+      "after": "The specified foundation concrete strength is 40 MPa."
+    },
+    {
+      "id": "ADD-1/3",
+      "section": "SPEC-09/2.2",
+      "topic": "pump warranty duration",
+      "before": "The pump warranty period is 18 months.",
+      "after": "The pump warranty period is 24 months."
+    },
+    {
+      "id": "ADD-2/1",
+      "section": "SPEC-11/2.1",
+      "topic": "drive enclosure rating",
+      "before": "The pump-drive enclosure rating is NEMA 12.",
+      "after": "The pump-drive enclosure rating is NEMA 4X."
+    },
+    {
+      "id": "ADD-2/2",
+      "section": "SPEC-13/2.2",
+      "topic": "telemetry alarm delay",
+      "before": "The telemetry alarm transmission delay is 45 seconds.",
+      "after": "The telemetry alarm transmission delay is 30 seconds."
+    },
+    {
+      "id": "ADD-2/3",
+      "section": "SPEC-16/2.1",
+      "topic": "epoxy dry-film thickness",
+      "before": "The completed epoxy dry-film thickness is 300 micrometres.",
+      "after": "The completed epoxy dry-film thickness is 350 micrometres."
+    },
+    {
+      "id": "ADD-3/1",
+      "section": "SPEC-17/3.1",
+      "topic": "station reliability run",
+      "before": "The station reliability-run duration is 48 hours.",
+      "after": "The station reliability-run duration is 72 hours."
+    },
+    {
+      "id": "ADD-3/2",
+      "section": "SPEC-19/3.1",
+      "topic": "operator training duration",
+      "before": "The required operator training duration is 6 hours.",
+      "after": "The required operator training duration is 8 hours."
+    },
+    {
+      "id": "ADD-3/3",
+      "section": "SPEC-20/3.2",
+      "topic": "spare intake-screen sets",
+      "before": "The spare ventilation intake-screen set quantity is 1.",
+      "after": "The spare ventilation intake-screen set quantity is 2."
+    }
+  ],
+  "gaps": [
+    {
+      "id": "GAP-01",
+      "section": "SPEC-03/3.1",
+      "topic": "north foundation overexcavation depth",
+      "quote": "The engineer of record shall determine the overexcavation depth below the north foundation after the bearing surface is exposed."
+    },
+    {
+      "id": "GAP-02",
+      "section": "SPEC-04/2.2",
+      "topic": "east-gate finished grade",
+      "quote": "The engineer of record shall select that grade after the retained road edge is surveyed."
+    },
+    {
+      "id": "GAP-03",
+      "section": "SPEC-05/2.2",
+      "topic": "existing masonry anchor embedment",
+      "quote": "The engineer of record shall set the embedment after reviewing the exposed wall construction."
+    },
+    {
+      "id": "GAP-04",
+      "section": "SPEC-06/2.3",
+      "topic": "existing hoist beam allowable load",
+      "quote": "The engineer of record shall determine that load after the beam and connections are inspected."
+    },
+    {
+      "id": "GAP-05",
+      "section": "SPEC-08/2.3",
+      "topic": "legacy flange gasket elastomer",
+      "quote": "The engineer of record shall select it after the owner provides the historical cleaning-chemical record."
+    },
+    {
+      "id": "GAP-06",
+      "section": "SPEC-12/2.3",
+      "topic": "high-high alarm elevation",
+      "quote": "The engineer of record shall set that elevation after the owner confirms the overflow risk assessment."
+    },
+    {
+      "id": "GAP-07",
+      "section": "SPEC-13/2.3",
+      "topic": "remote restart acknowledgement policy",
+      "quote": "The engineer of record shall choose whether operator acknowledgement is required before remote restart is enabled."
+    },
+    {
+      "id": "GAP-08",
+      "section": "SPEC-15/2.3",
+      "topic": "washwater backflow-preventer type",
+      "quote": "The engineer of record shall select the device after the utility confirms its connection requirements."
+    },
+    {
+      "id": "GAP-09",
+      "section": "SPEC-18/2.2",
+      "topic": "odor media breakthrough threshold",
+      "quote": "The engineer of record shall set that threshold after the owner approves the odor monitoring plan."
+    },
+    {
+      "id": "GAP-10",
+      "section": "SPEC-20/2.3",
+      "topic": "future owner fiber minimum bend radius",
+      "quote": "The engineer of record shall determine that radius after the owner selects the cable construction."
+    }
+  ],
+  "calculations": [
+    {
+      "id": "CALC-01",
+      "topic": "combined duty-pump flow",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "flow per duty pump",
+          "citation": "SPEC-09/1.2",
+          "quote": "The design flow per duty pump is 32 L/s.",
+          "value": 32
+        },
+        {
+          "name": "simultaneous duty pumps",
+          "citation": "SPEC-09/2.1",
+          "quote": "The simultaneous duty pump count is 2.",
+          "value": 2
+        }
+      ],
+      "unit": "L/s",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-02",
+      "topic": "daily temporary bypass volume",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "temporary bypass flow",
+          "citation": "SPEC-02/2.1",
+          "quote": "The temporary bypass design flow is 18 L/s.",
+          "value": 18
+        },
+        {
+          "name": "daily pumping allowance",
+          "citation": "SPEC-02/2.2",
+          "quote": "The daily bypass pumping allowance is 28800 seconds.",
+          "value": 28800
+        }
+      ],
+      "unit": "L",
+      "tolerance": 1
+    },
+    {
+      "id": "CALC-03",
+      "topic": "usable temporary storage",
+      "operation": "subtract",
+      "inputs": [
+        {
+          "name": "gross tank volume",
+          "citation": "SPEC-02/2.3",
+          "quote": "The temporary storage tank gross volume is 96 m3.",
+          "value": 96
+        },
+        {
+          "name": "unused freeboard volume",
+          "citation": "SPEC-02/2.3",
+          "quote": "The required unused freeboard volume is 24 m3.",
+          "value": 24
+        }
+      ],
+      "unit": "m3",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-04",
+      "topic": "wet-well storage filling time",
+      "operation": "divide",
+      "inputs": [
+        {
+          "name": "usable operating volume",
+          "citation": "SPEC-12/1.2",
+          "quote": "The usable wet-well operating volume is 72 m3.",
+          "value": 72
+        },
+        {
+          "name": "net filling rate",
+          "citation": "SPEC-12/2.2",
+          "quote": "The design net wet-well filling rate is 0.024 m3/s.",
+          "value": 0.024
+        }
+      ],
+      "unit": "s",
+      "tolerance": 0.1
+    },
+    {
+      "id": "CALC-05",
+      "topic": "combined hydrostatic test water",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "branch test volume",
+          "citation": "SPEC-08/1.2",
+          "quote": "The pump-branch hydrostatic test volume is 2.4 m3.",
+          "value": 2.4
+        },
+        {
+          "name": "buried-main test volume",
+          "citation": "SPEC-08/3.1",
+          "quote": "The buried pressure-main hydrostatic test volume is 18 m3.",
+          "value": 18
+        }
+      ],
+      "unit": "m3",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-06",
+      "topic": "nominal excavation haul loads",
+      "operation": "divide",
+      "inputs": [
+        {
+          "name": "off-site excavation volume",
+          "citation": "SPEC-03/1.2",
+          "quote": "The estimated off-site excavation volume is 180 m3.",
+          "value": 180
+        },
+        {
+          "name": "nominal truck capacity",
+          "citation": "SPEC-03/2.2",
+          "quote": "The nominal loose-soil volume per haul truck is 12 m3.",
+          "value": 12
+        }
+      ],
+      "unit": "loads",
+      "tolerance": 0
+    },
+    {
+      "id": "CALC-07",
+      "topic": "pressure-main trench plan area",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "trench centerline length",
+          "citation": "C-101/2",
+          "quote": "The surveyed pressure-main trench length is 85 m.",
+          "value": 85
+        },
+        {
+          "name": "planned trench width",
+          "citation": "SPEC-03/2.3",
+          "quote": "The planned pressure-main trench width is 1.4 m.",
+          "value": 1.4
+        }
+      ],
+      "unit": "m2",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-08",
+      "topic": "topsoil stripping volume",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "stripping area",
+          "citation": "SPEC-04/1.2",
+          "quote": "The topsoil stripping area is 650 m2.",
+          "value": 650
+        },
+        {
+          "name": "stripping depth",
+          "citation": "SPEC-04/2.1",
+          "quote": "The design topsoil stripping depth is 0.15 m.",
+          "value": 0.15
+        }
+      ],
+      "unit": "m3",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-09",
+      "topic": "total restored walking and vehicle area",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "vehicle-apron area",
+          "citation": "SPEC-04/2.3",
+          "quote": "The vehicle-apron restoration area is 180 m2.",
+          "value": 180
+        },
+        {
+          "name": "walkway area",
+          "citation": "C-101/3",
+          "quote": "The walkway restoration area is 45 m2.",
+          "value": 45
+        }
+      ],
+      "unit": "m2",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-10",
+      "topic": "foundation and plinth concrete",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "manifold foundation volume",
+          "citation": "SPEC-05/1.2",
+          "quote": "The manifold foundation concrete volume is 22 m3.",
+          "value": 22
+        },
+        {
+          "name": "pump plinth volume",
+          "citation": "S-101/2",
+          "quote": "The pump support plinth concrete volume is 4 m3.",
+          "value": 4
+        }
+      ],
+      "unit": "m3",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-11",
+      "topic": "remaining reinforcing steel delivery",
+      "operation": "subtract",
+      "inputs": [
+        {
+          "name": "scheduled steel",
+          "citation": "SPEC-05/3.2",
+          "quote": "The scheduled reinforcing steel quantity is 2800 kg.",
+          "value": 2800
+        },
+        {
+          "name": "first steel delivery",
+          "citation": "SPEC-05/3.2",
+          "quote": "The first reinforcing steel delivery quantity is 2100 kg.",
+          "value": 2100
+        }
+      ],
+      "unit": "kg",
+      "tolerance": 0.1
+    },
+    {
+      "id": "CALC-12",
+      "topic": "scheduled new grating panels before condition-based replacements",
+      "operation": "subtract",
+      "inputs": [
+        {
+          "name": "total grating panels",
+          "citation": "SPEC-06/1.2",
+          "quote": "The scheduled total grating panel count is 36.",
+          "value": 36
+        },
+        {
+          "name": "retained grating panels",
+          "citation": "S-101/3",
+          "quote": "The retained grating panel count is 12.",
+          "value": 12
+        }
+      ],
+      "unit": "panels",
+      "tolerance": 0
+    },
+    {
+      "id": "CALC-13",
+      "topic": "total valve actuator control load",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "control load per actuator",
+          "citation": "SPEC-07/2.2",
+          "quote": "Each motorized valve actuator control load is 90 W.",
+          "value": 90
+        },
+        {
+          "name": "motorized actuator count",
+          "citation": "SPEC-07/3.1",
+          "quote": "The motorized valve actuator count is 6.",
+          "value": 6
+        }
+      ],
+      "unit": "W",
+      "tolerance": 0.1
+    },
+    {
+      "id": "CALC-14",
+      "topic": "new discharge pipe length",
+      "operation": "subtract",
+      "inputs": [
+        {
+          "name": "full discharge route",
+          "citation": "SPEC-08/2.1",
+          "quote": "The full discharge-route pipe length is 132 m.",
+          "value": 132
+        },
+        {
+          "name": "retained downstream length",
+          "citation": "M-102/1",
+          "quote": "The retained downstream pipe length is 28 m.",
+          "value": 28
+        }
+      ],
+      "unit": "m",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-15",
+      "topic": "total simultaneous duty-motor rating",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "rating per duty motor",
+          "citation": "SPEC-09/3.1",
+          "quote": "The rated power per duty pump motor is 30 kW.",
+          "value": 30
+        },
+        {
+          "name": "simultaneous duty pumps",
+          "citation": "SPEC-09/2.1",
+          "quote": "The simultaneous duty pump count is 2.",
+          "value": 2
+        }
+      ],
+      "unit": "kW",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-16",
+      "topic": "distribution diversified demand total",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "building diversified demand",
+          "citation": "E-101/2",
+          "quote": "The control-building diversified demand is 16 kW.",
+          "value": 16
+        },
+        {
+          "name": "process feeder allowance",
+          "citation": "SPEC-10/2.1",
+          "quote": "The process feeder demand allowance is 60 kW.",
+          "value": 60
+        }
+      ],
+      "unit": "kW",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-17",
+      "topic": "auxiliary feeder current headroom",
+      "operation": "subtract",
+      "inputs": [
+        {
+          "name": "continuous feeder capacity",
+          "citation": "SPEC-10/2.3",
+          "quote": "The new auxiliary feeder continuous-current capacity is 100 A.",
+          "value": 100
+        },
+        {
+          "name": "scheduled operating current",
+          "citation": "E-601/1",
+          "quote": "The auxiliary feeder scheduled operating current is 72 A.",
+          "value": 72
+        }
+      ],
+      "unit": "A",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-18",
+      "topic": "installed and spare drive inventory",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "installed drives",
+          "citation": "E-601/2",
+          "quote": "The installed pump-drive count is 3.",
+          "value": 3
+        },
+        {
+          "name": "shelf spare drives",
+          "citation": "SPEC-11/1.2",
+          "quote": "The shelf spare drive count is 1.",
+          "value": 1
+        }
+      ],
+      "unit": "drives",
+      "tolerance": 0
+    },
+    {
+      "id": "CALC-19",
+      "topic": "ideal control backup duration",
+      "operation": "divide",
+      "inputs": [
+        {
+          "name": "usable backup energy",
+          "citation": "SPEC-11/2.3",
+          "quote": "The usable control backup energy is 1200 Wh.",
+          "value": 1200
+        },
+        {
+          "name": "backed-up load",
+          "citation": "SPEC-11/3.1",
+          "quote": "The control and telemetry backup load is 200 W.",
+          "value": 200
+        }
+      ],
+      "unit": "h",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-20",
+      "topic": "level-transmitter cable purchase length",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "measured route length",
+          "citation": "I-501/1",
+          "quote": "The measured level-transmitter cable route length is 85 m.",
+          "value": 85
+        },
+        {
+          "name": "service allowance",
+          "citation": "SPEC-12/3.1",
+          "quote": "The instrument cable service allowance is 15 m.",
+          "value": 15
+        }
+      ],
+      "unit": "m",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-21",
+      "topic": "local alarm response test interval",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "input debounce",
+          "citation": "SPEC-13/1.2",
+          "quote": "The PLC alarm-input debounce is 2 seconds.",
+          "value": 2
+        },
+        {
+          "name": "horn delay",
+          "citation": "I-101/2",
+          "quote": "The local alarm horn delay is 3 seconds.",
+          "value": 3
+        }
+      ],
+      "unit": "s",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-22",
+      "topic": "ideal control-room air replacement time",
+      "operation": "divide",
+      "inputs": [
+        {
+          "name": "clear room volume",
+          "citation": "H-101/2",
+          "quote": "The clear internal control-room volume is 120 m3.",
+          "value": 120
+        },
+        {
+          "name": "supply airflow",
+          "citation": "SPEC-14/2.1",
+          "quote": "The scheduled control-room supply airflow is 20 m3/min.",
+          "value": 20
+        }
+      ],
+      "unit": "min",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-23",
+      "topic": "normal daily sump drainage volume",
+      "operation": "multiply",
+      "inputs": [
+        {
+          "name": "volume per sump event",
+          "citation": "SPEC-15/1.2",
+          "quote": "The design sump pump-out volume per event is 160 L.",
+          "value": 160
+        },
+        {
+          "name": "daily event count",
+          "citation": "P-101/1",
+          "quote": "The planned daily sump pump-out event count is 9.",
+          "value": 9
+        }
+      ],
+      "unit": "L",
+      "tolerance": 0.1
+    },
+    {
+      "id": "CALC-24",
+      "topic": "theoretical single-coat material volume",
+      "operation": "divide",
+      "inputs": [
+        {
+          "name": "exposed spool coating area",
+          "citation": "M-501/1",
+          "quote": "The exposed steel spool coating area is 24 m2.",
+          "value": 24
+        },
+        {
+          "name": "theoretical coverage rate",
+          "citation": "SPEC-16/2.2",
+          "quote": "The theoretical single-coat coverage rate is 8 m2/L.",
+          "value": 8
+        }
+      ],
+      "unit": "L",
+      "tolerance": 0.01
+    },
+    {
+      "id": "CALC-25",
+      "topic": "combined witness-test duration",
+      "operation": "add",
+      "inputs": [
+        {
+          "name": "factory witness duration",
+          "citation": "G-001/2",
+          "quote": "The factory witness-test duration is 16 hours.",
+          "value": 16
+        },
+        {
+          "name": "site functional duration",
+          "citation": "SPEC-17/2.1",
+          "quote": "The site functional-test duration is 24 hours.",
+          "value": 24
+        }
+      ],
+      "unit": "h",
+      "tolerance": 0.01
+    }
+  ]
+}

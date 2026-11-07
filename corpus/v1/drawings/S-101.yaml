@@ -1,0 +1,30 @@
+{
+  "id": "S-101",
+  "title": "Foundation, platform, and wet-well access",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The wet-well access hatch cover shall be galvanized steel. Fit a positive hold-open device at the access side."
+    },
+    {
+      "number": 2,
+      "text": "The pump support plinth concrete volume is 4 m3. This volume excludes the manifold foundation."
+    },
+    {
+      "number": 3,
+      "text": "The retained grating panel count is 12. Inspect these panels after removal before returning them to the platform."
+    },
+    {
+      "number": 4,
+      "text": "Keep the existing hoist beam out of service until the engineer of record issues its allowable lifting load after inspection."
+    },
+    {
+      "number": 5,
+      "text": "Do not drill the retained masonry wall for connection anchors until the engineer of record issues the embedment design."
+    },
+    {
+      "number": 6,
+      "text": "Coordinate support-base anchors and sleeve locations with the accepted manifold shop drawing before the foundation pour."
+    }
+  ]
+}

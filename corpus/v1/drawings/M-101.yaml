@@ -1,0 +1,30 @@
+{
+  "id": "M-101",
+  "title": "Pump branches and discharge isolation",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The valve on each pump discharge shall be a gate valve. Locate the operator toward the maintenance platform."
+    },
+    {
+      "number": 2,
+      "text": "Orient each pump casing to keep the motor removal path clear of the discharge branch. Confirm the supplier withdrawal clearance before support fabrication."
+    },
+    {
+      "number": 3,
+      "text": "Install the branch check valve with its flow arrow toward the common manifold. Keep the service cover clear of the guardrail."
+    },
+    {
+      "number": 4,
+      "text": "Provide a dismantling joint between the branch isolation valve and the common manifold. The joint shall permit valve removal without cutting pipe."
+    },
+    {
+      "number": 5,
+      "text": "Route temporary pump-drain hoses to the controlled collection point. Do not discharge drain-down water onto the electrical-room access route."
+    },
+    {
+      "number": 6,
+      "text": "Support the common manifold independently of the pump casings. Check that branch flange bolts can be withdrawn with the supports installed."
+    }
+  ]
+}

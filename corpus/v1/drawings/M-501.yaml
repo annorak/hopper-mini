@@ -1,0 +1,30 @@
+{
+  "id": "M-501",
+  "title": "Mechanical details, supports, and coating limits",
+  "notes": [
+    {
+      "number": 1,
+      "text": "The exposed steel spool coating area is 24 m2. The area covers the new field-coated discharge spools and excludes factory-finished valve bodies."
+    },
+    {
+      "number": 2,
+      "text": "Keep pipe-support saddles clear of flange joints and dismantling-joint rods. Fit isolating pads at dissimilar-metal contact points."
+    },
+    {
+      "number": 3,
+      "text": "Protect machined flange faces and equipment nameplates from abrasive preparation and coating. Remove temporary masking before final assembly inspection."
+    },
+    {
+      "number": 4,
+      "text": "Provide access to drain plugs and vent points without removal of a permanent platform member."
+    },
+    {
+      "number": 5,
+      "text": "Use the accepted pump-base template to position the plinth anchor groups. Check level before equipment grout placement."
+    },
+    {
+      "number": 6,
+      "text": "Record coating repairs at lifting-lug and support contact areas after the final spool placement."
+    }
+  ]
+}

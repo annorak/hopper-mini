@@ -187,3 +187,64 @@ newest active version with a grade, then the newest creation time. Checker stora
 in the current spec. The provisional `checks` columns are `trace_id VARCHAR`, `task_id VARCHAR`,
 `passed BOOLEAN`, `criteria JSON`, and `created_at TIMESTAMPTZ`. Search does not read checks.
 The eight executable canonical queries and example named parameters are in `bench/queries.yaml`.
+
+## Build and inspect the Bayview corpus
+
+The fictional Bayview Pump Station Upgrade has 20 Markdown specifications, 12 drawing-note
+sheets, and three addenda in `corpus/v1`. The sources contain 140 spec sections, 72 drawing
+notes, six spec/drawing conflicts, nine addendum changes, and ten engineer-only gaps.
+`corpus/v1/cases.yaml` lists the planted cases and their exact source quotations.
+
+```sh
+uv run hopper corpus build
+uv run hopper corpus show
+uv run hopper corpus show SPEC-07/2.1
+uv run hopper corpus show M-101
+uv run hopper corpus search "butterfly valve discharge"
+```
+
+`build` prints the actual counts and `corpus_version`. It renders 1600 by 1000 PNG sheets
+under `$HOPPER_DATA_DIR/corpus/drawings` and writes `corpus/manifest.json` with their hashes.
+The pinned Pillow release supplies the font. Images have fixed layout and no timestamps,
+so repeated builds produce identical bytes. The source version is SHA256 over a version
+prefix followed by sorted, length-prefixed relative paths and file bytes, including
+`cases.yaml`. `show` accepts a document ID or an exact section, note, or addendum item ID.
+`search` ranks spec sections, drawing notes, and addendum items with BM25.
+
+## Validate the fixed RFI dataset
+
+`datasets/rfis.jsonl` holds 150 RFIs, with 25 each in `lookup`, `multi_section`,
+`missed_addendum`, `conflict`, `needs_engineer`, and `calculation`. Each record includes
+the question, source-derived answer key, gold answer, corpus version, and generation receipt.
+
+```sh
+uv run hopper tasks validate
+uv run hopper tasks selfcheck
+uv run hopper tasks generate
+uv run hopper spend
+```
+
+`validate` checks the complete task schedule, unique questions, source references, key
+agreement, provenance fields, and gold answers. `selfcheck` sends each gold answer through
+`hopper.checks.check_answer(key, answer)`. The checker reads only its two arguments and
+returns `pass` plus applicable criteria. Citations require exact IDs. Phrases ignore case
+and whitespace. Conflict document names must occur as whole IDs in answer text.
+Calculation values use an inclusive absolute tolerance. The answer's `value` is a finite
+JSON number, separate from the explanatory text. Every answer must carry a boolean
+`needs_engineer` that agrees with its key.
+
+`generate` reuses a valid existing dataset with zero model calls. If the dataset is absent,
+it drafts questions and gold answers with `claude-sonnet-5-5`, in batches of five, through
+the existing spend ledger. It never lets the model choose the answer key. Drafts are kept
+only after validation. Known invalid drafts permit at most three attempts per batch.
+All billed responses settle before draft validation, including rejected drafts.
+
+Requests, raw responses, and validation results remain under
+`$HOPPER_DATA_DIR/corpus/generation`. A restart reuses settled responses. An unresolved
+request stops generation and retains its ledger reservation. The final dataset is
+published only when all 150 records pass. `datasets/generation.json` records the dataset
+hash, model, receipt IDs, usage, settled cost, and outstanding reservations. The API key
+stays in the environment or `.env` and is never stored in a receipt.
+
+Corpus builds, searches, validation, and selfchecks do not generate tasks or call a model.
+The trace-based `hopper check` command belongs to the later agent milestone.

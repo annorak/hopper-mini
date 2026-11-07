@@ -1,0 +1,30 @@
+{
+  "id": "H-101",
+  "title": "Ventilation layout and air balance",
+  "notes": [
+    {
+      "number": 1,
+      "text": "Control-room supply-air filters shall be MERV 8. Use a gasketed filter rack with withdrawal access from the aisle."
+    },
+    {
+      "number": 2,
+      "text": "The clear internal control-room volume is 120 m3. The volume excludes the ceiling service void and the valve room."
+    },
+    {
+      "number": 3,
+      "text": "Orient the outdoor intake hood away from the wet-well vent. Keep the intake screen removable from the service side."
+    },
+    {
+      "number": 4,
+      "text": "Route process-room exhaust away from the control-room intake. Seal the separating wall around duct and cable penetrations."
+    },
+    {
+      "number": 5,
+      "text": "Provide flexible connections at the fans and support ducts independently. Keep the supplier service space clear."
+    },
+    {
+      "number": 6,
+      "text": "Balance the control-room supply with the doors closed and the accepted filter installed. Mark the final damper setting after the airflow test."
+    }
+  ]
+}

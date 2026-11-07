@@ -1,0 +1,30 @@
+{
+  "id": "G-001",
+  "title": "General arrangement and construction sequence",
+  "notes": [
+    {
+      "number": 1,
+      "text": "Read this arrangement with the station specifications and the latest addenda. Maintain owner access from the road gate to the control room throughout the work."
+    },
+    {
+      "number": 2,
+      "text": "The factory witness-test duration is 16 hours. Carry this duration as the factory activity in the witness staffing plan."
+    },
+    {
+      "number": 3,
+      "text": "Place temporary pumps on the landward equipment pad. Keep bypass hose clear of the wet-well hatch and the operator walking route."
+    },
+    {
+      "number": 4,
+      "text": "Survey existing pipe centerlines before releasing the discharge manifold for fabrication. Record the survey reference in the spool shop drawing."
+    },
+    {
+      "number": 5,
+      "text": "Submit the lift plan before bringing replacement pumps onto the access apron. Use a lifting arrangement with a verified rating for the proposed lift."
+    },
+    {
+      "number": 6,
+      "text": "Keep the rollback spool and its fasteners at the tie-in work area until permanent pumping has passed the site duty test."
+    }
+  ]
+}
