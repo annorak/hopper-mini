@@ -5,6 +5,7 @@ import io
 import json
 import shutil
 import threading
+import urllib.error
 from dataclasses import asdict, replace
 from decimal import Decimal
 
@@ -119,6 +120,94 @@ def install_provider(monkeypatch, replies):
 
 def exported(exporters):
     return [span for exporter in exporters for span in exporter.get_finished_spans()]
+
+
+def test_count_tokens_retries_rate_limit_but_paid_request_does_not(monkeypatch, tmp_path):
+    calls, waits = [], []
+
+    def send(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) != 2:
+            raise urllib.error.HTTPError(
+                request.full_url, 429, "rate limit", {"retry-after": "7"}, io.BytesIO(b"")
+            )
+        return io.BytesIO(b'{"input_tokens":123}')
+
+    monkeypatch.setattr(agent_module.urllib.request, "urlopen", send)
+    monkeypatch.setattr(agent_module, "sleep", waits.append)
+    settings = Settings(tmp_path, anthropic_api_key="test")
+    assert agent_module._count_tokens(settings, {}) == 123
+    assert len(calls) == 2 and waits == [7]
+    with pytest.raises(agent_module.ProviderRateLimited):
+        agent_module._post_json(settings, "messages", {})
+    assert len(calls) == 3 and waits == [7]
+
+
+def test_count_token_rate_retries_are_bounded(monkeypatch, tmp_path):
+    calls, waits = [], []
+
+    def send(*args):
+        calls.append(args)
+        raise agent_module.ProviderRateLimited("messages/count_tokens", 1)
+
+    monkeypatch.setattr(agent_module, "_post_json", send)
+    monkeypatch.setattr(agent_module, "sleep", waits.append)
+    with pytest.raises(agent_module.ProviderRateLimited):
+        agent_module._count_tokens(Settings(tmp_path), {})
+    assert len(calls) == 6 and waits == [2, 4, 8, 16, 32]
+
+
+def test_provider_outage_cancels_queued_conversations(environment, monkeypatch):
+    instance, task, _ = environment
+    calls = []
+
+    def unavailable(*args):
+        calls.append(args)
+        raise ProviderError("token counter unavailable")
+
+    monkeypatch.setattr(agent_module, "_post_json", unavailable)
+    tasks = [replace(task, id=f"task-{index}") for index in range(100)]
+    with pytest.raises(agent_module.AgentError, match="Batch stopped"):
+        instance.batch(tasks, 1)
+    assert 1 <= len(calls) <= 4
+    assert instance.ledger.summary() == []
+
+
+def test_seed_identity_and_cost_stage_cover_every_emitted_span(environment, monkeypatch):
+    instance, task, exporters = environment
+    instance = Agent(instance.settings, seed_id="seed")
+    install_provider(monkeypatch, [triage(), findings(), answer()])
+    result = instance.run(task)
+    assert result.answer == ANSWER
+    spans = exported(exporters)
+    assert all(span.resource.attributes["hopper.seed.id"] == "seed" for span in spans)
+    root = next(span for span in spans if span.parent is None)
+    assert root.attributes["hopper.research.step_cap"] == instance.baseline.research_step_cap
+    assert all(total.stage.startswith("seed:seed:") for total in instance.ledger.summary())
+
+
+def test_transient_fault_kinds_are_real_error_spans_and_reporting_still_succeeds(
+    environment, monkeypatch
+):
+    instance, task, exporters = environment
+    monkeypatch.setattr(agent_module, "tool_fault", lambda *args: True)
+    install_provider(
+        monkeypatch,
+        [
+            triage(),
+            *[response([tool("read_section", {"id": "SPEC-01"}, f"read-{i}")]) for i in range(3)],
+            findings(),
+            answer(),
+        ],
+    )
+    assert instance.run(task).answer == ANSWER
+    errors = [span for span in exported(exporters) if span.status.status_code == StatusCode.ERROR]
+    assert {span.attributes["error.type"] for span in errors} == {
+        "ToolUnavailable",
+        "ToolTimedOut",
+        "ToolRateLimited",
+    }
+    assert len(errors) == 3
 
 
 def test_complete_exchange_has_exact_stage_tools_and_settled_usage(environment, monkeypatch):
@@ -517,6 +606,7 @@ def test_writer_refusal_or_invalid_answer_never_returns_answer(environment, monk
 
 def test_research_stops_after_eight_model_calls_without_writer(environment, monkeypatch):
     instance, task, _ = environment
+    instance.baseline = replace(instance.baseline, research_step_cap=8)
     provider = install_provider(
         monkeypatch,
         [

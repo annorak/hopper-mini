@@ -1,6 +1,7 @@
 import hashlib
 import http.client
 import json
+import logging
 import math
 import urllib.error
 import urllib.request
@@ -9,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from threading import Event
-from time import perf_counter
+from time import perf_counter, sleep
 from uuid import uuid4
 
 from hopper import otel
@@ -20,6 +21,7 @@ from hopper.ledger import CallResult, Ledger
 
 MODEL = "claude-haiku-5-5"
 MAX_TOKENS = 16_000
+TOKEN_COUNT_ATTEMPTS = 6
 DEFAULT_BASELINE = Path(__file__).resolve().parents[2] / "agents" / "rfi" / "baseline.json"
 FOLLOWUP_QUESTIONS = (
     "Please restate the governing requirement and its exact source citations for our field team.",
@@ -44,11 +46,25 @@ class ProviderError(AgentError):
     pass
 
 
+class ProviderRateLimited(ProviderError):
+    def __init__(self, endpoint: str, retry_after: float):
+        super().__init__(f"Anthropic {endpoint} returned HTTP 429; retry after {retry_after:g}s")
+        self.retry_after = retry_after
+
+
 class ModelStopped(AgentError):
     pass
 
 
 class ToolUnavailable(AgentError):
+    pass
+
+
+class ToolTimedOut(AgentError):
+    pass
+
+
+class ToolRateLimited(AgentError):
     pass
 
 
@@ -84,6 +100,22 @@ class RunResult:
     settled_usd: str
     held_usd: str
     elapsed_seconds: float
+    error_type: str | None = None
+
+    @property
+    def should_stop_batch(self) -> bool:
+        return (
+            self.error_type
+            in {
+                "ProviderError",
+                "ProviderRateLimited",
+                "SpendCapExceeded",
+                "UsageLimitExceeded",
+            }
+            or Decimal(self.held_usd) > 0
+            or self.answer is not None
+            and self.error is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -116,8 +148,8 @@ class Baseline:
             for text in [*prompts.values(), *descriptions.values()]
         ):
             raise ValueError("Baseline prompts and tool descriptions must be nonempty text")
-        if type(data["research_step_cap"]) is not int or not 1 <= data["research_step_cap"] <= 8:
-            raise ValueError("research_step_cap must be an integer from 1 to 8")
+        if type(data["research_step_cap"]) is not int or not 1 <= data["research_step_cap"] <= 12:
+            raise ValueError("research_step_cap must be an integer from 1 to 12")
         if data["effort"] not in {"low", "medium", "high"}:
             raise ValueError("effort must be low, medium, or high")
         version = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
@@ -161,11 +193,39 @@ def _post_json(settings: Settings, endpoint: str, payload: dict) -> dict:
         with urllib.request.urlopen(request, timeout=180) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
+        error.close()
+        if error.code == 429:
+            try:
+                delay = float((error.headers or {}).get("retry-after", "10"))
+            except ValueError:
+                delay = math.inf
+            if not math.isfinite(delay) or not 0 <= delay <= 60:
+                raise ProviderError(
+                    "Rate-limit wait exceeds the bounded 60-second retry delay"
+                ) from error
+            raise ProviderRateLimited(endpoint, delay) from error
         raise ProviderError(
             f"Anthropic {endpoint} returned HTTP {error.code}; not retried"
         ) from error
     except (OSError, http.client.HTTPException, ValueError) as error:
         raise ProviderError(f"Anthropic {endpoint} outcome is unknown; not retried") from error
+
+
+def _count_tokens(settings: Settings, payload: dict) -> int:
+    for attempt in range(TOKEN_COUNT_ATTEMPTS):
+        try:
+            return _post_json(settings, "messages/count_tokens", payload)["input_tokens"]
+        except ProviderRateLimited as error:
+            if attempt == TOKEN_COUNT_ATTEMPTS - 1:
+                raise
+            delay = max(error.retry_after, 2 ** (attempt + 1))
+            logging.getLogger(__name__).warning(
+                "Token counting rate limited; retry %s/%s in %ss",
+                attempt + 1,
+                TOKEN_COUNT_ATTEMPTS - 1,
+                delay,
+            )
+            sleep(delay)
 
 
 def _usage(response: dict) -> TokenUsage:
@@ -221,10 +281,15 @@ def _arguments(name: str, arguments: dict, corpus: Corpus) -> None:
 
 
 class Agent:
-    def __init__(self, settings: Settings, baseline: Path = DEFAULT_BASELINE):
+    def __init__(
+        self, settings: Settings, baseline: Path = DEFAULT_BASELINE, *, seed_id: str | None = None
+    ):
         if not settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY is required to run the RFI agent")
         self.settings = settings
+        if seed_id is not None and not seed_id.strip():
+            raise ValueError("seed_id must be nonempty")
+        self.seed_id = seed_id
         self.baseline = Baseline.load(baseline)
         self.corpus = load_corpus()
         manifest_path = settings.data_dir / "corpus" / "manifest.json"
@@ -265,15 +330,22 @@ class Agent:
 
         def conversation_runs(task, repeat):
             conversation = Conversation(cancelled=cancelled)
-            turns = [self.run(task, repeat, conversation)]
-            for question in FOLLOWUP_QUESTIONS[
-                : followup_count(task.id, repeat) if followups else 0
-            ]:
-                if cancelled.is_set() or turns[-1].answer is None or turns[-1].error:
+            turns = []
+            questions = [
+                task.question,
+                *FOLLOWUP_QUESTIONS[: followup_count(task.id, repeat) if followups else 0],
+            ]
+            for question in questions:
+                if cancelled.is_set():
                     break
-                turns.append(
-                    self.run(Task(task.id, question, task.corpus_version), repeat, conversation)
+                result = self.run(
+                    Task(task.id, question, task.corpus_version), repeat, conversation
                 )
+                turns.append(result)
+                if result.should_stop_batch:
+                    cancelled.set()
+                if result.error or result.answer is None:
+                    break
             return turns
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -287,6 +359,8 @@ class Agent:
                         results.append(result)
                         if progress:
                             progress(result)
+                        if result.should_stop_batch:
+                            raise AgentError(f"Batch stopped after {result.error}")
             except BaseException:
                 cancelled.set()
                 for future in futures:
@@ -324,8 +398,15 @@ class Agent:
 class _Turn:
     def __init__(self, agent: Agent, task: Task, repeat: int, conversation: Conversation):
         self.agent, self.task, self.repeat, self.conversation = agent, task, repeat, conversation
-        self.prefix = f"agent:{uuid4().hex}:"
-        self.telemetry = otel.Telemetry(agent.settings, task.id, agent.baseline.version)
+        self.prefix = (
+            f"seed:{agent.seed_id}:{uuid4().hex}:" if agent.seed_id else f"agent:{uuid4().hex}:"
+        )
+        self.telemetry = otel.Telemetry(
+            agent.settings,
+            task.id,
+            agent.baseline.version,
+            resource_attributes={"hopper.seed.id": agent.seed_id} if agent.seed_id else {},
+        )
         self.read_drawings: set[str] = set()
 
     def chat(self, stage: str, messages: list[dict], tools: list[dict]) -> dict:
@@ -386,9 +467,7 @@ class _Turn:
                 payload.update(
                     tools=tools, tool_choice={"type": "auto", "disable_parallel_tool_use": True}
                 )
-            count = _post_json(self.agent.settings, "messages/count_tokens", payload)[
-                "input_tokens"
-            ]
+            count = _count_tokens(self.agent.settings, payload)
             if type(count) is not int or not 0 <= count <= 98_976:
                 raise AgentError("Input token count is invalid or exceeds the 100000-token budget")
             payload["max_tokens"] = MAX_TOKENS
@@ -453,8 +532,15 @@ class _Turn:
                             f"Use read_drawing for {', '.join(sorted(unread))} "
                             "before reporting findings"
                         )
-                if tool_fault(self.task.id, self.repeat, self.conversation.tool_number):
-                    raise ToolUnavailable("Document service unavailable; retry this tool call")
+                if name not in {"report_findings", "submit_answer"} and tool_fault(
+                    self.task.id, self.repeat, self.conversation.tool_number
+                ):
+                    fault = (ToolUnavailable, ToolTimedOut, ToolRateLimited)[
+                        self.conversation.tool_number % 3
+                    ]
+                    raise fault(
+                        "Simulated transient document service failure; retry this tool call"
+                    )
                 content = self.execute(name, arguments)
                 if name in {"report_findings", "submit_answer"}:
                     terminal = arguments
@@ -546,7 +632,7 @@ class _Turn:
 
     def run(self) -> RunResult:
         started = perf_counter()
-        answer, error, trace_id = None, None, ""
+        answer, error, error_type, trace_id = None, None, None, ""
         turn = self.conversation.turn
         messages = [*self.conversation.history, otel.text_message("user", self.task.question)]
         try:
@@ -560,6 +646,7 @@ class _Turn:
                         "gen_ai.input.messages": otel.json_content(otel.trace_messages(messages)),
                         "hopper.repeat": self.repeat,
                         "hopper.turn": turn,
+                        "hopper.research.step_cap": self.agent.baseline.research_step_cap,
                     },
                 ) as span:
                     trace_id = format(span.get_span_context().trace_id, "032x")
@@ -616,6 +703,7 @@ class _Turn:
                         ),
                     )
         except (ValueError, RuntimeError, OSError, KeyError, TypeError) as failure:
+            error_type = type(failure).__name__
             error = f"{type(failure).__name__}: {failure}"
             if notes := getattr(failure, "__notes__", None):
                 error += "; " + "; ".join(notes)
@@ -641,4 +729,5 @@ class _Turn:
             str(sum((cost.settled_usd for cost in costs), Decimal(0))),
             str(sum((cost.held_usd for cost in costs), Decimal(0))),
             round(perf_counter() - started, 3),
+            error_type,
         )

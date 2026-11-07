@@ -274,8 +274,58 @@ def find_query(
     _print_query(result, as_json=as_json)
 
 
-for name in "profile check replay graders grade label bench chaos evals climb report".split():
+for name in "replay graders grade label bench chaos evals climb report".split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
+
+
+@app.command("profile")
+def profile_seed(
+    dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET,
+    seed_id: Annotated[
+        str | None, typer.Option(help="One cohort; default reports every cohort.")
+    ] = None,
+) -> None:
+    """Report every section 4.4 richness metric from finished seed spans."""
+    from hopper.profile import profile_seed as measure
+    from hopper.seed import seed_ids
+
+    started = perf_counter()
+    try:
+        data_dir = Settings.from_env().data_dir
+        selected = [seed_id] if seed_id is not None else seed_ids(data_dir) or ["seed"]
+        results = [measure(data_dir, dataset, identity) for identity in selected]
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    for result in results:
+        typer.echo(result.render())
+    typer.echo(f"Elapsed {perf_counter() - started:.3f}s; continuous percentiles; UTF-8 bytes")
+    if not all(result.passed for result in results):
+        raise typer.Exit(1)
+
+
+@app.command("check")
+def check_seed(
+    dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET,
+    seed_id: Annotated[
+        str | None, typer.Option(help="One cohort; default checks every cohort.")
+    ] = None,
+) -> None:
+    """Publish missing answer-key checks and report mode and criterion pass rates."""
+    from hopper.checks import check_seed as check
+    from hopper.seed import seed_ids
+
+    started = perf_counter()
+    try:
+        data_dir = Settings.from_env().data_dir
+        selected = [seed_id] if seed_id is not None else seed_ids(data_dir) or ["seed"]
+        results = [check(data_dir, dataset, identity) for identity in selected]
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    for result in results:
+        typer.echo(result.render())
+    typer.echo(f"Elapsed {perf_counter() - started:.3f}s")
 
 
 @agent_app.command("run")
@@ -313,6 +363,7 @@ def agent_batch(
     followups: Annotated[bool, typer.Option("--followups/--no-followups")] = True,
     dataset: Annotated[Path, typer.Option()] = DEFAULT_DATASET,
     config: Annotated[Path | None, typer.Option(help="Agent baseline JSON.")] = None,
+    seed_id: Annotated[str, typer.Option(help="Seed cohort for profile and check.")] = "seed",
 ) -> None:
     """Print each turn and a batch summary, including follow-ups and settled/held cost."""
     from hopper.agent import DEFAULT_BASELINE, Agent, Task
@@ -323,7 +374,7 @@ def agent_batch(
 
     try:
         tasks = [Task.from_record(record) for record in load_tasks(dataset)[:limit]]
-        summary = Agent(Settings.from_env(), config or DEFAULT_BASELINE).batch(
+        summary = Agent(Settings.from_env(), config or DEFAULT_BASELINE, seed_id=seed_id).batch(
             tasks, repeats, followups=followups, progress=report
         )
     except (OSError, ValueError, RuntimeError) as error:
