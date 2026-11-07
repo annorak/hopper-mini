@@ -175,9 +175,99 @@ def _not_implemented(context: typer.Context) -> None:
     raise typer.Exit(2)
 
 
+def _print_query(result, *, as_json: bool = False) -> None:
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [dict(zip(result.columns, row, strict=True)) for row in result.rows], default=str
+            )
+        )
+    else:
+        typer.echo("\t".join(result.columns))
+        for row in result.rows:
+            typer.echo("\t".join("NULL" if value is None else str(value) for value in row))
+        typer.echo(f"{len(result.rows)} rows")
+    if result.profile is not None:
+        typer.echo(result.profile.render(), err=True)
+
+
+@app.command("sql")
+def sql_query(
+    sql: Annotated[str, typer.Argument(help="SQL over the published data views.")],
+    profile: bool = typer.Option(False, help="Print DuckDB query metrics to stderr."),
+) -> None:
+    """Run SQL over spans, traces, grades, trace_grades, and checks."""
+    from hopper.query import execute_sql
+
+    try:
+        result = execute_sql(Settings.from_env().data_dir, sql, profile=profile)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    _print_query(result)
+
+
+@app.command("trace")
+def trace_query(
+    trace_id: str,
+    full: bool = typer.Option(False, help="Print complete messages instead of 200 characters."),
+) -> None:
+    """Print a complete span tree with timing, model, tokens, and messages."""
+    from hopper.query import read_trace, render_trace
+
+    try:
+        result = read_trace(Settings.from_env().data_dir, trace_id)
+        if not result.rows:
+            raise ValueError(f"Trace not found: {trace_id}")
+        rendered = render_trace(result, full=full)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(rendered)
+
+
+@app.command("find")
+def find_query(
+    service: str | None = None,
+    since: Annotated[str | None, typer.Option(help="Positive duration, such as 1h or 7d.")] = None,
+    start: Annotated[str | None, typer.Option("--from", help="Inclusive ISO timestamp.")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="Exclusive root ISO timestamp.")] = None,
+    status: str | None = None,
+    tool: str | None = None,
+    text: Annotated[str | None, typer.Option(help="Literal case-insensitive text.")] = None,
+    grade: Annotated[list[str] | None, typer.Option(help="Repeat grader=yes|no|unsure.")] = None,
+    task: str | None = None,
+    conversation: str | None = None,
+    limit: Annotated[int, typer.Option(help="Maximum number of traces.")] = 100,
+    as_json: Annotated[bool, typer.Option("--json", help="Print a JSON array.")] = False,
+    profile: bool = typer.Option(False, help="Print DuckDB query metrics to stderr."),
+) -> None:
+    """Find complete traces and show every active grader's current label."""
+    from hopper.query import FindFilters, find_traces, parse_grade, parse_window
+
+    try:
+        lower, upper = parse_window(since, start, end)
+        filters = FindFilters(
+            start=lower,
+            end=upper,
+            service=service,
+            status=status,
+            tool=tool,
+            text=text,
+            grades=tuple(parse_grade(value) for value in grade or []),
+            task=task,
+            conversation=conversation,
+            limit=limit,
+        )
+        result = find_traces(Settings.from_env().data_dir, filters, profile=profile)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    _print_query(result, as_json=as_json)
+
+
 for name in (
-    "sql trace find corpus tasks agent profile check replay "
-    "graders grade label bench chaos evals climb report"
+    "corpus tasks agent profile check replay graders grade label bench chaos evals climb report"
 ).split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
 

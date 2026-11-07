@@ -15,6 +15,7 @@ dependencies = [
     "protobuf",
     "pyarrow",
     "python-dotenv>=1.0",
+    "pyyaml>=6.0",
     "pytz",
     "typer>=0.15",
 ]

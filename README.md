@@ -150,3 +150,40 @@ PYTHONPATH=src uv run python benchmarks/bench_writer.py --keep-data
 ```
 
 The script compares 10,000 three-span traces with the SDK's original fields, repeats a captured upload across a writer restart, and measures acknowledgment to completed DuckDB query. It reports every trial's counts, errors, achieved rate, and latency. `--keep-data` retains the printed data folders for `HOPPER_DATA_DIR=<folder> uv run hopper verify`. The separate SIGKILL tests above stop the writer at known publication boundaries.
+
+## Query published traces
+
+The query commands read published Parquet files from `HOPPER_DATA_DIR`. They work on an empty
+store without starting the receiver or writer.
+
+```sh
+hopper sql 'SELECT trace_id, finished FROM traces' --profile
+hopper find --since 1h --status ERROR --json --profile
+hopper find --service rfi-agent --tool read_drawing --text ADD-2 \
+  --grade answered_question=yes --grade grounded=no --task RFI-001 \
+  --conversation conversation-1 --limit 10
+hopper find --from 2026-11-01 --to 2026-11-02
+hopper trace 0123456789abcdef0123456789abcdef
+hopper trace 0123456789abcdef0123456789abcdef --full
+```
+
+`find` returns complete traces and every active grader's current label. Span filters can match
+different spans in the same trace. Missing grades remain `NULL`. The default limit is 100.
+`--text` matches a literal substring in attributes without case sensitivity.
+
+`--since` accepts positive durations with `s`, `m`, `h`, `d`, or `w`. It cannot be combined with
+`--from` or `--to`. ISO timestamps without an offset, including dates, mean UTC. Time windows
+include the lower bound and exclude the upper bound, and select traces by their root start.
+Children after the upper bound remain in the trace. Lower bounds prune spans before aggregation,
+using the invariant that children start no earlier than their root.
+
+`trace` prints the first 200 characters of each input and output message. Truncated messages end
+with `...`. `--full` prints complete messages. `--profile` prints DuckDB's wall time, bytes read,
+row groups scanned and available, and rows scanned to stderr, so `find --json` remains valid JSON.
+
+SQL views are `spans`, `traces`, `grades_all`, `active_graders`, `grades`, `trace_grades`, and
+`checks`. Active grader versions come from `graders/<name>/v<version>.yaml`. `grades` selects the
+newest active version with a grade, then the newest creation time. Checker storage has no schema
+in the current spec. The provisional `checks` columns are `trace_id VARCHAR`, `task_id VARCHAR`,
+`passed BOOLEAN`, `criteria JSON`, and `created_at TIMESTAMPTZ`. Search does not read checks.
+The eight executable canonical queries and example named parameters are in `bench/queries.yaml`.

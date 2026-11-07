@@ -1,0 +1,91 @@
+q1:
+  description: The full trace with a given id.
+  parameters:
+    trace_id: 0123456789abcdef0123456789abcdef
+  sql: |
+    SELECT * FROM spans WHERE trace_id = $trace_id ORDER BY start_time, span_id;
+
+q2:
+  description: Traces rooted in the last hour with errors, preserving all their spans.
+  parameters: {}
+  sql: |
+    SELECT trace_id, min(start_time) AS start_time, count(*) AS span_count,
+           count(*) FILTER (WHERE status = 'ERROR') AS error_count
+    FROM spans WHERE start_time >= now() - INTERVAL 1 HOUR
+    GROUP BY trace_id
+    HAVING bool_or(parent_span_id IS NULL) AND bool_or(status = 'ERROR')
+    ORDER BY start_time DESC, trace_id;
+
+q3:
+  description: Failed read_drawing spans in one UTC day.
+  parameters:
+    day_start: '2026-11-01T00:00:00Z'
+    day_end: '2026-11-02T00:00:00Z'
+  sql: |
+    SELECT trace_id, span_id, start_time, tool_name, status
+    FROM spans WHERE start_time >= $day_start::TIMESTAMPTZ
+      AND start_time < $day_end::TIMESTAMPTZ
+      AND tool_name = 'read_drawing' AND status = 'ERROR'
+    ORDER BY start_time, trace_id, span_id;
+
+q4:
+  description: Traces rooted in the last seven days mentioning butterfly valve.
+  parameters: {}
+  sql: |
+    SELECT trace_id, min(start_time) AS start_time, count(*) AS span_count
+    FROM spans WHERE start_time >= now() - INTERVAL 7 DAY
+    GROUP BY trace_id
+    HAVING bool_or(parent_span_id IS NULL)
+      AND bool_or(contains(lower(CAST(attributes AS VARCHAR)), 'butterfly valve'))
+    ORDER BY start_time DESC, trace_id;
+
+q5:
+  description: Recent traces with answered_question=yes and grounded=no, reading those graders.
+  parameters: {}
+  sql: |
+    WITH recent AS (
+      SELECT trace_id, min(start_time) AS start_time
+      FROM spans WHERE start_time >= now() - INTERVAL 7 DAY
+      GROUP BY trace_id HAVING bool_or(parent_span_id IS NULL)
+    )
+    SELECT t.trace_id, t.start_time, a.label AS answered_question, g.label AS grounded
+    FROM recent t JOIN grades a USING (trace_id) JOIN grades g USING (trace_id)
+    WHERE a.grader = 'answered_question' AND a.label = 'yes'
+      AND g.grader = 'grounded' AND g.label = 'no'
+    ORDER BY t.start_time DESC, t.trace_id;
+
+q6:
+  description: Q5 traces from rfi-agent also mentioning ADD-2.
+  parameters: {}
+  sql: |
+    WITH recent AS (
+      SELECT trace_id, min(start_time) AS start_time,
+             any_value(service) FILTER (WHERE parent_span_id IS NULL) AS service
+      FROM spans WHERE start_time >= now() - INTERVAL 7 DAY
+      GROUP BY trace_id
+      HAVING bool_or(parent_span_id IS NULL)
+        AND bool_or(contains(lower(CAST(attributes AS VARCHAR)), 'add-2'))
+    )
+    SELECT t.trace_id, t.start_time, a.label AS answered_question, g.label AS grounded
+    FROM recent t JOIN grades a USING (trace_id) JOIN grades g USING (trace_id)
+    WHERE t.service = 'rfi-agent'
+      AND a.grader = 'answered_question' AND a.label = 'yes'
+      AND g.grader = 'grounded' AND g.label = 'no'
+    ORDER BY t.start_time DESC, t.trace_id;
+
+q7:
+  description: Trace p95 duration and total tokens per agent version per UTC day.
+  parameters: {}
+  sql: |
+    SELECT date_trunc('day', start_time) AS day, agent_version,
+           quantile_cont(duration_ms, 0.95) AS p95_duration_ms,
+           sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)) AS total_tokens
+    FROM traces GROUP BY day, agent_version ORDER BY day, agent_version;
+
+q8:
+  description: Every trace in a conversation, in start order.
+  parameters:
+    conversation_id: conversation-1
+  sql: |
+    SELECT trace_id, start_time, root_name, service, span_count
+    FROM traces WHERE conversation_id = $conversation_id ORDER BY start_time, trace_id;
