@@ -16,6 +16,8 @@ from opentelemetry.proto.trace.v1.trace_pb2 import Span, Status
 
 from hopper import wal
 
+IDENTITY_BATCH_SIZE = 20_000
+
 KIND_NAMES = {number: name.removeprefix("SPAN_KIND_") for name, number in Span.SpanKind.items()}
 STATUS_NAMES = {
     number: name.removeprefix("STATUS_CODE_") for name, number in Status.StatusCode.items()
@@ -176,6 +178,7 @@ def verify(data_dir: Path) -> Verification:
                 [[str(path) for path in files]],
             )
         recent = {}
+        seen_ids = set()
         retained_seen = 0
         for record in records:
             if report.records == 0:
@@ -187,6 +190,12 @@ def verify(data_dir: Path) -> Verification:
                         [record.start, record.upload.received_at - timedelta(minutes=10)],
                     ).fetchall():
                         recent[trace, span] = received
+                    cursor = connection.execute(
+                        "SELECT from_hex(trace_id || span_id) FROM stored WHERE log_offset < ?",
+                        [record.start],
+                    )
+                    while identities := cursor.fetchmany(IDENTITY_BATCH_SIZE):
+                        seen_ids.update(identity for (identity,) in identities)
             snapshot_end = record.end
             report.records += 1
             if record.end > position:
@@ -196,16 +205,24 @@ def verify(data_dir: Path) -> Verification:
             expected = {}
             for row in _expected(record):
                 key = row["trace_id"], row["span_id"]
-                if key not in recent:
+                identity = bytes.fromhex("".join(key))
+                is_replay = row["replay_of"] is not None
+                if key not in recent and (not is_replay or identity not in seen_ids):
                     recent[key] = record.upload.received_at
+                    seen_ids.add(identity)
                     expected[key] = row
                 else:
                     original = expected.get(key)
                     if original is None and files:
+                        query = (
+                            "SELECT * FROM stored WHERE trace_id=? AND span_id=? AND log_offset < ?"
+                        )
+                        parameters = [*key, record.start]
+                        if not is_replay:
+                            query += " AND received_at=?"
+                            parameters.append(recent[key])
                         cursor = connection.execute(
-                            "SELECT * FROM stored WHERE trace_id=? AND span_id=? "
-                            "AND received_at=? AND log_offset < ? ORDER BY log_offset LIMIT 1",
-                            [*key, recent[key], record.start],
+                            query + " ORDER BY log_offset LIMIT 1", parameters
                         )
                         values = cursor.fetchone()
                         if values is not None:

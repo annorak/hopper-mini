@@ -214,14 +214,20 @@ def test_literal_lossless_schema_and_gzip(tmp_path):
     assert schema["input_tokens"] == "BIGINT"
 
 
-def test_empty_and_duplicate_only_commit_and_restart_backlog(tmp_path):
+def test_live_empty_and_duplicate_only_commit_and_restart_backlog(tmp_path):
+    message = request()
+    resource = message.resource_spans[0].resource
+    replay_attribute = next(
+        attribute for attribute in resource.attributes if attribute.key == "hopper.replay.of"
+    )
+    resource.attributes.remove(replay_attribute)
     with wal.Wal.open(tmp_path) as log:
-        append(log, request())
+        append(log, message)
         drain(tmp_path)
-        append(log, request(), RECEIVED + timedelta(minutes=9))
+        append(log, message, RECEIVED + timedelta(minutes=9))
         append(log, ExportTraceServiceRequest(), RECEIVED + timedelta(minutes=9))
         drain(tmp_path)
-        append(log, request(), RECEIVED + timedelta(minutes=10))
+        append(log, message, RECEIVED + timedelta(minutes=10))
         drain(tmp_path)
     assert len(rows(tmp_path)) == 2
     files = sorted((tmp_path / "spans").glob("*.parquet"))
@@ -238,6 +244,32 @@ def test_empty_and_duplicate_only_commit_and_restart_backlog(tmp_path):
     report = verify(tmp_path)
     assert not report.ok
     assert report.duplicate_ids == 1
+
+
+@pytest.mark.parametrize("is_separate_flush", [False, True])
+def test_replay_retries_outlive_window_in_same_writer(tmp_path, monkeypatch, is_separate_flush):
+    monkeypatch.setattr("hopper.writer.FLUSH_SECONDS", float("inf"))
+    with wal.Wal.open(tmp_path) as log:
+        original = append(log, request())
+        writer = Writer(tmp_path)
+        try:
+            if is_separate_flush:
+                writer.consume(target=original.end)
+            retry = append(log, request(), RECEIVED + timedelta(minutes=11))
+            writer.consume(target=retry.end)
+            assert writer.position == retry.end
+        finally:
+            writer.close()
+    assert [(row["log_offset"], row["received_at"]) for row in rows(tmp_path)] == [
+        (original.start, RECEIVED)
+    ]
+    assert len(list((tmp_path / "spans").glob("*.parquet"))) == (2 if is_separate_flush else 1)
+    assert wal.stat(tmp_path).writer_position == retry.end
+    assert wal.stat(tmp_path).backlog == 0
+    report = verify(tmp_path)
+    assert report.ok, report.render()
+    assert report.records == 2
+    assert report.expected_spans == report.actual_spans == 1
 
 
 def test_typed_copies_do_not_coerce_and_null_schema(tmp_path):
@@ -295,12 +327,12 @@ def test_real_sigkill_at_publication_boundaries(tmp_path, boundary):
         drain(tmp_path)
         pending = request()
         pending.resource_spans[0].scope_spans[0].spans[0].span_id = b"x" * 8
-        append(log, pending, compressed=True)
-        append(log, pending, compressed=True)
+        append(log, pending, RECEIVED + timedelta(minutes=11), compressed=True)
+        append(log, pending, RECEIVED + timedelta(minutes=22), compressed=True)
         pending.resource_spans[0].scope_spans[0].spans[0].span_id = b"y" * 8
-        append(log, pending)
-        append(log, ExportTraceServiceRequest())
-        append(log, request())
+        append(log, pending, RECEIVED + timedelta(minutes=22))
+        append(log, ExportTraceServiceRequest(), RECEIVED + timedelta(minutes=22))
+        append(log, request(), RECEIVED + timedelta(minutes=22))
     code = """
 import os, signal, sys
 from pathlib import Path
@@ -343,6 +375,11 @@ instance.consume(target=wal.stat(path).durable_end)
         if child.poll() is None:
             child.kill()
             child.wait(5)
+    with wal.Wal.open(tmp_path) as log:
+        append(log, request(), RECEIVED + timedelta(minutes=33))
+        retry = request()
+        retry.resource_spans[0].scope_spans[0].spans[0].span_id = b"x" * 8
+        append(log, retry, RECEIVED + timedelta(minutes=33))
     drain(tmp_path)
     report = verify(tmp_path)
     assert report.ok, report.render()
@@ -380,7 +417,11 @@ def test_finite_shutdown_target_does_not_consume_later_records(tmp_path):
     assert verify(tmp_path).ok
 
 
-def test_retained_retry_can_use_original_before_pruned_floor(tmp_path, monkeypatch):
+@pytest.mark.parametrize("is_pruned", [False, True])
+@pytest.mark.parametrize("is_changed", [False, True])
+def test_replay_retry_survives_restart_and_wal_retention(
+    tmp_path, monkeypatch, is_pruned, is_changed
+):
     record_size = len(
         wal._encode(
             wal.Upload(RECEIVED, "application/x-protobuf", request().SerializeToString(), False)
@@ -390,15 +431,34 @@ def test_retained_retry_can_use_original_before_pruned_floor(tmp_path, monkeypat
     with wal.Wal.open(tmp_path) as log:
         original = append(log, request())
         drain(tmp_path)
-        append(log, request(), RECEIVED + timedelta(minutes=1))
+        append(log, request(), RECEIVED + timedelta(minutes=11))
         drain(tmp_path)
-        assert wal.prune(tmp_path, retention=timedelta(0))
-        assert wal.stat(tmp_path).retained_start == original.end
+        if is_pruned:
+            assert wal.prune(tmp_path, retention=timedelta(0))
+            assert wal.stat(tmp_path).retained_start == original.end
+        message = request()
+        if is_changed:
+            message.resource_spans[0].scope_spans[0].spans[0].name = "edit"
+        retry = append(log, message, RECEIVED + timedelta(minutes=22))
+        drain(tmp_path)
+        assert [(row["log_offset"], row["received_at"]) for row in rows(tmp_path)] == [
+            (original.start, RECEIVED)
+        ]
+        assert wal.stat(tmp_path).writer_position == retry.end
+        assert wal.stat(tmp_path).backlog == 0
         result = verify(tmp_path)
-        assert result.ok, result.render()
-        assert result.expected_spans == 0
+        assert result.records == (2 if is_pruned else 3)
+        assert result.expected_spans == (0 if is_pruned else 1)
         assert result.actual_spans == 1
-        assert "not verified" in result.diagnostics[-1]
+        assert result.missing == result.unexpected == result.duplicate_ids == 0
+        if is_changed:
+            assert not result.ok and result.mismatches == 1
+            assert "Unequal retry" in result.diagnostics[0]
+            assert "name" in result.diagnostics[0]
+        else:
+            assert result.ok, result.render()
+        if is_pruned:
+            assert "not verified" in result.diagnostics[-1]
 
 
 def test_retained_retry_checks_pruned_original_payload(tmp_path, monkeypatch):
@@ -412,7 +472,7 @@ def test_retained_retry_checks_pruned_original_payload(tmp_path, monkeypatch):
         append(log, request())
         drain(tmp_path)
         original_file = next((tmp_path / "spans").glob("*.parquet"))
-        append(log, request(), RECEIVED + timedelta(minutes=1))
+        append(log, request(), RECEIVED + timedelta(minutes=11))
         drain(tmp_path)
         wal.prune(tmp_path, retention=timedelta(0))
     with duckdb.connect() as connection:

@@ -274,7 +274,50 @@ def find_query(
     _print_query(result, as_json=as_json)
 
 
-for name in "replay graders grade label bench chaos evals climb report".split():
+@app.command("replay")
+def replay_traces(
+    traces: Annotated[int, typer.Option(min=1, help="Number of traces to replay.")] = 10_000,
+    rate: Annotated[float, typer.Option(min=0.001, help="Target spans per second.")] = 2_000,
+    seed: Annotated[int, typer.Option(help="Deterministic replay seed.")] = 0,
+    seed_id: Annotated[str, typer.Option(help="Source seed cohort.")] = "seed",
+    salt: Annotated[bool, typer.Option(help="Give every captured message a unique salt.")] = False,
+    vendor_noise: Annotated[
+        float,
+        typer.Option(min=0, max=100, help="Percentage of spans with nested vendor attributes."),
+    ] = 0,
+    inline_images: Annotated[
+        bool, typer.Option(help="Send corpus drawings as base64 image blobs.")
+    ] = False,
+) -> None:
+    """Replay seed traces through OTLP and print acknowledgement and fault counts."""
+    from hopper.replay import ReplayOptions, replay
+
+    try:
+        summary = replay(
+            Settings.from_env(),
+            ReplayOptions(
+                traces=traces,
+                rate=rate,
+                seed=seed,
+                seed_id=seed_id,
+                salt=salt,
+                vendor_noise=vendor_noise,
+                inline_images=inline_images,
+            ),
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps(summary))
+    typer.echo("mix\tcount\ttotal\ttarget_percent\tactual_percent")
+    for row in summary["mix"]:
+        typer.echo(
+            f"{row['kind']}\t{row['count']}\t{row['total']}\t"
+            f"{row['target_percent']:.3f}\t{row['actual_percent']:.3f}"
+        )
+
+
+for name in "graders grade label bench chaos evals climb report".split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
 
 

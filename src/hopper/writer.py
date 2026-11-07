@@ -199,8 +199,14 @@ class Writer:
                 raise ValueError("Committed span range exceeds durable WAL")
             self.recent = {}
             self.expiry = []
+            self.seen_ids = set()
             if files:
                 paths = [str(path) for path in files]
+                cursor = self.connection.execute(
+                    "SELECT from_hex(trace_id || span_id) FROM read_parquet(?)", [paths]
+                )
+                while identities := cursor.fetchmany(FLUSH_SPANS):
+                    self.seen_ids.update(identity for (identity,) in identities)
                 latest = self.connection.execute(
                     "SELECT max(received_at) FROM read_parquet(?)", [paths]
                 ).fetchone()[0]
@@ -240,8 +246,12 @@ class Writer:
                 for row in _rows(record):
                     self.pending.decoded += 1
                     key = row["trace_id"], row["span_id"]
-                    if key not in self.recent:
+                    identity = bytes.fromhex("".join(key))
+                    if key not in self.recent and (
+                        row["replay_of"] is None or identity not in self.seen_ids
+                    ):
                         self.pending.rows.append(row)
+                        self.seen_ids.add(identity)
                         self.recent[key] = record.upload.received_at
                         heapq.heappush(self.expiry, (record.upload.received_at, key))
                 self.pending.records += 1

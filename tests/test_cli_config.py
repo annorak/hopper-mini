@@ -21,7 +21,7 @@ def test_help_lists_all_commands():
     assert result.exit_code == 0
     assert set(get_command(app).commands) == expected
     assert all(name in result.output for name in expected)
-    stub = runner.invoke(app, ["replay"])
+    stub = runner.invoke(app, ["graders"])
     assert stub.exit_code == 2
     assert "not implemented" in stub.output
 
