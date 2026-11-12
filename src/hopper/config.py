@@ -35,14 +35,14 @@ def money(value: str | Decimal, name: str) -> Decimal:
 class Settings:
     data_dir: Path
     spend_cap_usd: Decimal = Decimal("20")
-    jev_usd_per_1k_questions: Decimal = Decimal("0.07")
+    jev_usd_per_million_input_tokens: Decimal = Decimal("0.042")
     endpoint: str = "http://127.0.0.1:4318"
     anthropic_api_key: str | None = field(default=None, repr=False)
     typesafe_api_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         money(self.spend_cap_usd, "HOPPER_SPEND_CAP_USD")
-        money(self.jev_usd_per_1k_questions, "JEV_USD_PER_1K_QUESTIONS")
+        money(self.jev_usd_per_million_input_tokens, "JEV_USD_PER_MILLION_INPUT_TOKENS")
 
     @classmethod
     def from_env(cls, env_file: str | Path = ".env") -> "Settings":
@@ -50,8 +50,9 @@ class Settings:
         return cls(
             data_dir=Path(values.get("HOPPER_DATA_DIR") or "~/hopper-data").expanduser(),
             spend_cap_usd=money(values.get("HOPPER_SPEND_CAP_USD", "20"), "HOPPER_SPEND_CAP_USD"),
-            jev_usd_per_1k_questions=money(
-                values.get("JEV_USD_PER_1K_QUESTIONS", "0.07"), "JEV_USD_PER_1K_QUESTIONS"
+            jev_usd_per_million_input_tokens=money(
+                values.get("JEV_USD_PER_MILLION_INPUT_TOKENS", "0.042"),
+                "JEV_USD_PER_MILLION_INPUT_TOKENS",
             ),
             endpoint=values.get("HOPPER_ENDPOINT") or "http://127.0.0.1:4318",
             anthropic_api_key=values.get("ANTHROPIC_API_KEY"),
@@ -110,11 +111,11 @@ class TokenUsage:
 
 
 @dataclass(frozen=True)
-class QuestionUsage:
-    questions: int
+class JevUsage:
+    input_tokens: int
 
     def __post_init__(self) -> None:
-        validate_counts(self.questions)
+        validate_counts(self.input_tokens)
 
 
 @dataclass(frozen=True)
@@ -128,14 +129,14 @@ class TokenBudget:
 
 
 @dataclass(frozen=True)
-class QuestionBudget:
+class JevBudget:
     model: str
-    questions: int
+    max_input_tokens: int
 
     def __post_init__(self) -> None:
-        validate_counts(self.questions)
+        validate_counts(self.max_input_tokens)
         if not self.model:
-            raise ValueError("Question-priced model must be nonempty")
+            raise ValueError("Jev model must be nonempty")
 
 
 def token_cost(model: str, usage: TokenUsage) -> Decimal:

@@ -69,7 +69,7 @@ hopper ingest serve --full-fsync
 
 `--full-fsync` uses macOS `F_FULLFSYNC`. The default uses group commit. `HOPPER_ENDPOINT` defaults to `http://127.0.0.1:4318` and must be an HTTP loopback origin.
 
-To run the receiver and writer under local supervision, use:
+To run the receiver, writer, and grader under local supervision, use:
 
 ```sh
 hopper stack up
@@ -77,7 +77,7 @@ hopper stack status
 hopper stack down
 ```
 
-These commands print JSON with `receiver_pid` and `writer_pid`. `up` waits for both children to become ready. A failed first start cleans up the supervisor. After startup, each crashed child restarts independently with a retry delay capped at one second. `down` first drains the receiver, then the writer, with five seconds per child before SIGKILL. Each child also drains when its parent connection closes. Logs are in `$HOPPER_DATA_DIR/.stack/supervisor.log`.
+These commands print JSON with `receiver_pid`, `writer_pid`, and `grader_pid`. `up` waits for all three children to become ready. A failed first start cleans up the supervisor. After startup, each crashed child restarts independently with a retry delay capped at one second. `down` drains the receiver, then the writer, then stops the grader, with five seconds per child before SIGKILL. Each child also stops when its parent connection closes. Logs are in `$HOPPER_DATA_DIR/.stack/supervisor.log`.
 
 Send `POST /v1/traces` with `Content-Type: application/x-protobuf` and optional `Content-Encoding: gzip`. The receiver keeps the original body, including gzip bytes. HTTP 200 contains an empty `ExportTraceServiceResponse` and follows the WAL's durable receipt. Empty protobuf requests are valid. Each span needs a 16-byte trace ID and an 8-byte span ID.
 
@@ -183,10 +183,58 @@ row groups scanned and available, and rows scanned to stderr, so `find --json` r
 
 SQL views are `spans`, `traces`, `grades_all`, `active_graders`, `grades`, `trace_grades`, and
 `checks`. Active grader versions come from `graders/<name>/v<version>.yaml`. `grades` selects the
-newest active version with a grade, then the newest creation time. Checker storage has no schema
+newest active version with a fresh grade, then the newest creation time. Freshness requires the
+stored trace revision and replay seed revision to match the visible spans. Checker storage has no schema
 in the current spec. The provisional `checks` columns are `trace_id VARCHAR`, `task_id VARCHAR`,
 `passed BOOLEAN`, `criteria JSON`, and `created_at TIMESTAMPTZ`. Search does not read checks.
 The eight executable canonical queries and example named parameters are in `bench/queries.yaml`.
+
+## Grade finished traces
+
+Set `TYPESAFE_API_KEY` in `.env`, then install the seed graders and drain existing work:
+
+```sh
+hopper init
+hopper graders list
+hopper grade work --once
+hopper grade work --rps 5 --usd-per-hour 1
+```
+
+`init` installs `answered_question`, `grounded`, `actionable`, and `cites_sources`. A minimal
+budgeted probe resolves `jev-latest` to a concrete model version. Repeating `init` preserves
+that pin and the graders' lifecycle states. Jev costs use actual input tokens and
+`JEV_USD_PER_MILLION_INPUT_TOKENS` (default `0.042`). Existing ledger costs retain their prices.
+
+The worker groups a trace's pending Jev questions by pinned model into one request per model,
+runs code graders locally, and publishes one Parquet file per grader per pass. Replays copy
+their seed's exact-version grades with zero cost and `source=replayed`. Late spans invalidate
+both the seed grade and its replay copies. Missing grades remain missing in query results.
+An exclusive lock prevents two workers from grading the same data folder concurrently.
+
+Pass summaries print throughput, p50/p99 lag from finished to fully graded, each grader's
+unsure rate, coverage, settled cost, and outstanding holds. Lag includes historical backlog
+age. Unknown request outcomes retain budget reservations across restarts.
+
+Create a draft from a YAML definition that omits `version`, `status`, and `validation`:
+
+```sh
+hopper graders new grader.yaml
+hopper graders promote grounded --version 2
+hopper graders retire grounded --version 1
+```
+
+Omitting a Jev model, or specifying `jev-latest`, resolves a new pin after validating the
+draft. An explicit concrete model is retained. Jev promotion requires at least 50 labels
+with 0.85 agreement; code promotion runs its unit tests. External code graders require
+`--test-target path/to/test.py`. The old active version remains available until the worker
+has full coverage for its replacement, then retires automatically.
+
+Legacy grade files without revision columns remain readable in `grades_all` and are
+backfilled before becoming current. Keep the worker and query changes together when
+deploying or rolling back: older query code does not enforce revision freshness.
+
+See [the grading verification](benchmarks/grader-verification.md) for the live measurements,
+unsure examples, and SIGKILL recovery result.
 
 ## Build and inspect the Bayview corpus
 

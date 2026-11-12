@@ -1,6 +1,9 @@
 import asyncio
 import base64
 import json
+import os
+import subprocess
+import sys
 from dataclasses import asdict
 from datetime import UTC, timedelta
 from enum import StrEnum
@@ -11,7 +14,7 @@ from typing import Annotated
 import typer
 
 from hopper import wal
-from hopper.config import DATA_DIRECTORIES, Settings
+from hopper.config import DATA_DIRECTORIES, Settings, money
 from hopper.ledger import Ledger
 from hopper.tasks import DEFAULT_DATASET
 
@@ -19,7 +22,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_
 wal_app = typer.Typer(no_args_is_help=True, help="Inspect and prune the local write-ahead log.")
 app.add_typer(wal_app, name="wal")
 ingest_app = typer.Typer(no_args_is_help=True, help="Receive OTLP trace uploads.")
-stack_app = typer.Typer(no_args_is_help=True, help="Supervise the local receiver and writer.")
+stack_app = typer.Typer(no_args_is_help=True, help="Supervise the receiver, writer, and grader.")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(stack_app, name="stack")
 writer_app = typer.Typer(no_args_is_help=True, help="Publish durable uploads as Parquet.")
@@ -30,6 +33,10 @@ app.add_typer(corpus_app, name="corpus")
 app.add_typer(tasks_app, name="tasks")
 agent_app = typer.Typer(no_args_is_help=True, help="Run RFIs and emit GenAI traces.")
 app.add_typer(agent_app, name="agent")
+graders_app = typer.Typer(no_args_is_help=True, help="Manage immutable grader versions.")
+grade_app = typer.Typer(no_args_is_help=True, help="Grade finished traces.")
+app.add_typer(graders_app, name="graders")
+app.add_typer(grade_app, name="grade")
 
 
 class FsyncMode(StrEnum):
@@ -54,7 +61,7 @@ def ingest_serve(
 
 @stack_app.command("up")
 def stack_up() -> None:
-    """Start supervision and wait for receiver and writer readiness."""
+    """Start supervision and wait for every child to become ready."""
     from hopper.stack import up
 
     _stack_command(up)
@@ -62,7 +69,7 @@ def stack_up() -> None:
 
 @stack_app.command("down")
 def stack_down() -> None:
-    """Stop supervision and drain the receiver, then the writer."""
+    """Stop the receiver, drain the writer, and stop grading."""
     from hopper.stack import down
 
     _stack_command(down)
@@ -139,18 +146,158 @@ def wal_prune(
 
 @app.command()
 def init() -> None:
-    """Create missing shared data directories and initialize the ledger."""
+    """Initialize shared storage and install the pinned seed graders."""
+    from hopper.graders import Catalog
+
     started = perf_counter()
     try:
         ledger = Ledger(Settings.from_env())
         ledger.initialize()
-    except (OSError, ValueError) as error:
+        graders = Catalog(ledger.settings.data_dir).install_seeds(
+            lambda: asyncio.run(_resolve_grader_model(ledger))
+        )
+    except Exception as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(1) from error
     typer.echo(
         f"{len(DATA_DIRECTORIES)} data directories ready at {ledger.settings.data_dir}; "
-        f"ledger ready; {perf_counter() - started:.3f}s"
+        f"ledger ready; {len(graders)} seed graders ready; {perf_counter() - started:.3f}s"
     )
+
+
+async def _resolve_grader_model(ledger: Ledger) -> str:
+    from hopper.graders.jev import JevClient
+
+    async with JevClient(ledger, rps=5, usd_per_hour=None) as client:
+        return await client.resolve_model()
+
+
+@graders_app.command("list")
+def graders_list() -> None:
+    """Print every grader version and its lifecycle status."""
+    from hopper.graders import Catalog, JevGrader
+
+    try:
+        graders = Catalog(Settings.from_env().data_dir).list_graders()
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo("name\tversion\tstatus\tkind\tmodel\tapplies_to\tfields")
+    for grader in graders:
+        model = grader.model if isinstance(grader, JevGrader) else "NULL"
+        typer.echo(
+            f"{grader.name}\t{grader.version}\t{grader.status}\t{grader.kind}\t{model}\t"
+            f"{grader.applies_to}\t{','.join(grader.fields)}"
+        )
+
+
+@graders_app.command("new")
+def graders_new(
+    definition: Annotated[Path, typer.Argument(help="YAML draft without version or status.")],
+) -> None:
+    """Create the next immutable draft version from a YAML definition."""
+    from hopper.graders import Catalog, read_document
+
+    try:
+        ledger = Ledger(Settings.from_env())
+        document = read_document(definition)
+        document.setdefault("origin", "human")
+        grader = Catalog(ledger.settings.data_dir).create_draft(
+            document, resolve_model=lambda: asyncio.run(_resolve_grader_model(ledger))
+        )
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps(asdict(grader)))
+
+
+def _run_code_grader_tests(grader, test_targets: list[str]) -> None:
+    root = Path(__file__).resolve().parents[2]
+    targets = []
+    if grader.function == "hopper.graders.code:cites_sources":
+        targets.append(str(root / "tests" / "test_grader_code.py"))
+    if not targets and not test_targets:
+        raise ValueError("External code graders require at least one --test-target")
+    for target in test_targets:
+        path, *selectors = target.split("::")
+        if target.startswith("-") or not Path(path).exists():
+            raise ValueError(f"Test target must name an existing path: {target}")
+        targets.append("::".join([str(Path(path).resolve()), *selectors]))
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-o", "addopts=", *targets],
+        cwd=root,
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Code grader tests failed:\n{result.stdout}{result.stderr}")
+
+
+@graders_app.command("promote")
+def graders_promote(
+    name: str,
+    version: Annotated[int, typer.Option(min=1, help="Draft version to activate.")],
+    test_target: Annotated[
+        list[str] | None,
+        typer.Option(help="Pytest path or node ID; required for external code graders."),
+    ] = None,
+) -> None:
+    """Activate a validated Jev grader or a code grader whose tests pass."""
+    from hopper.graders import Catalog
+
+    try:
+        grader = Catalog(Settings.from_env().data_dir).promote(
+            name,
+            version,
+            run_code_tests=lambda grader: _run_code_grader_tests(grader, test_target or []),
+        )
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps(asdict(grader)))
+
+
+@graders_app.command("retire")
+def graders_retire(
+    name: str,
+    version: Annotated[int, typer.Option(min=1, help="Draft or active version to retire.")],
+) -> None:
+    """Retire one grader version without rewriting its content."""
+    from hopper.graders import Catalog
+
+    try:
+        grader = Catalog(Settings.from_env().data_dir).retire(name, version)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(json.dumps(asdict(grader)))
+
+
+@grade_app.command("work")
+def grade_work(
+    rps: Annotated[float, typer.Option(min=0.001, help="Maximum Jev requests per second.")] = 5,
+    usd_per_hour: Annotated[str, typer.Option(help="Rolling hourly grading budget in USD.")] = "1",
+    once: Annotated[
+        bool, typer.Option(help="Drain eligible work and bounded retries, then exit.")
+    ] = False,
+) -> None:
+    """Grade pending finished traces and print each pass summary."""
+    from hopper.graders.worker import run_worker
+
+    try:
+        asyncio.run(
+            run_worker(
+                Settings.from_env(),
+                rps=rps,
+                usd_per_hour=money(usd_per_hour, "usd_per_hour"),
+                once=once,
+            )
+        )
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
 
 
 @app.command()
@@ -317,7 +464,7 @@ def replay_traces(
         )
 
 
-for name in "graders grade label bench chaos evals climb report".split():
+for name in "label bench chaos evals climb report".split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
 
 

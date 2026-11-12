@@ -16,6 +16,11 @@ from hopper.edge import listen_address
 START_SECONDS = 10
 STOP_SECONDS = 5
 POLL_SECONDS = 0.05
+CHILD_MODULES = {
+    "receiver": "hopper.edge",
+    "writer": "hopper.writer",
+    "grader": "hopper.graders.worker",
+}
 
 
 async def _read_ready(parent: socket.socket) -> bytes:
@@ -57,8 +62,7 @@ def status(settings: Settings) -> dict:
         return {
             "phase": "starting" if _locked(settings.data_dir) else "stopped",
             "supervisor_pid": None,
-            "receiver_pid": None,
-            "writer_pid": None,
+            **{f"{role}_pid": None for role in CHILD_MODULES},
             "error": None,
         }
 
@@ -131,10 +135,11 @@ class Supervisor:
         self.settings = settings
         self.stop = asyncio.Event()
         self.phase = "starting"
-        self.children: dict[str, subprocess.Popen | None] = {"receiver": None, "writer": None}
-        self.ready = {"receiver": False, "writer": False}
+        self.children: dict[str, subprocess.Popen | None] = dict.fromkeys(CHILD_MODULES)
+        self.ready = dict.fromkeys(CHILD_MODULES, False)
         self.receiver_ready = asyncio.Event()
         self.writer_stop = asyncio.Event()
+        self.grader_stop = asyncio.Event()
         self.error: str | None = None
 
     def snapshot(self) -> dict:
@@ -201,7 +206,7 @@ class Supervisor:
                     [
                         sys.executable,
                         "-m",
-                        "hopper.edge" if role == "receiver" else "hopper.writer",
+                        CHILD_MODULES[role],
                     ],
                     env=env,
                     stdin=subprocess.DEVNULL,
@@ -222,7 +227,8 @@ class Supervisor:
                 if ready.result() != b"ready\n":
                     kind, _, message = ready.result().partition(b" ")
                     can_retry_startup = (
-                        kind in (b"wal-busy", b"writer-busy") and loop.time() < initial_deadline
+                        kind in (b"wal-busy", b"writer-busy", b"grader-busy")
+                        and loop.time() < initial_deadline
                     )
                     raise RuntimeError(
                         message.decode(errors="replace").strip()
@@ -268,6 +274,7 @@ class Supervisor:
         receiver = asyncio.create_task(self.run_child("receiver", self.stop))
         ready = asyncio.create_task(self.receiver_ready.wait())
         writer = None
+        grader = None
         stopped = asyncio.create_task(self.stop.wait())
         try:
             await asyncio.wait([receiver, ready], return_when=asyncio.FIRST_COMPLETED)
@@ -275,8 +282,9 @@ class Supervisor:
                 await receiver
                 return
             writer = asyncio.create_task(self.run_child("writer", self.writer_stop))
+            grader = asyncio.create_task(self.run_child("grader", self.grader_stop))
             done, _ = await asyncio.wait(
-                [receiver, writer, stopped], return_when=asyncio.FIRST_COMPLETED
+                [receiver, writer, grader, stopped], return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
                 await task
@@ -287,6 +295,9 @@ class Supervisor:
             self.writer_stop.set()
             if writer is not None:
                 await asyncio.gather(writer, return_exceptions=True)
+            self.grader_stop.set()
+            if grader is not None:
+                await asyncio.gather(grader, return_exceptions=True)
             ready.cancel()
             stopped.cancel()
             await asyncio.gather(ready, stopped, return_exceptions=True)
@@ -315,6 +326,7 @@ async def supervise(settings: Settings) -> None:
             supervisor.stop.set()
             await supervisor.stop_child("receiver")
             await supervisor.stop_child("writer")
+            await supervisor.stop_child("grader")
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(sig)
             path.unlink(missing_ok=True)

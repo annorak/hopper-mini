@@ -21,6 +21,7 @@ dependencies = [
     "pytz",
     "typer>=0.15",
     "pillow==12.0.0",
+    "typesafe-sdk==0.7.5",
 ]
 
 [project.scripts]

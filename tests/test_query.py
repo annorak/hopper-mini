@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +12,7 @@ import yaml
 from typer.testing import CliRunner
 
 from hopper.cli import app
+from hopper.graders import SEED_CODE
 from hopper.query import (
     CHECK_COLUMNS,
     FindFilters,
@@ -54,17 +58,17 @@ def span(trace, identity, start, *, parent=None, seconds=1, **values):
     return row
 
 
-def write_spans(directory, rows, *, row_group_size=None):
+def write_spans(directory, rows, *, row_group_size=None, filename="0-1.parquet"):
     folder = directory / "spans"
     folder.mkdir(parents=True, exist_ok=True)
     pq.write_table(
         pa.Table.from_pylist(rows, schema=SCHEMA),
-        folder / "0-1.parquet",
+        folder / filename,
         row_group_size=row_group_size,
     )
 
 
-def grader(directory, name, version=1, status="active"):
+def grader(directory, name, version=1, status="active", *, applies_to="*"):
     folder = directory / "graders" / name
     folder.mkdir(parents=True, exist_ok=True)
     (folder / f"v{version}.yaml").write_text(
@@ -73,12 +77,23 @@ def grader(directory, name, version=1, status="active"):
                 "name": name,
                 "version": version,
                 "status": status,
+                "applies_to": applies_to,
             }
         )
     )
 
 
-def write_grades(directory, name, values):
+def write_grades(
+    directory,
+    name,
+    values,
+    *,
+    trace_log_offset=0,
+    seed_log_offset=None,
+    source="live",
+    filename="grades.parquet",
+    is_legacy=False,
+):
     schema = pa.schema(
         [
             ("trace_id", pa.string()),
@@ -95,6 +110,9 @@ def write_grades(directory, name, values):
             ("created_at", pa.timestamp("us", tz="UTC")),
         ]
     )
+    if not is_legacy:
+        schema = schema.append(pa.field("trace_log_offset", pa.int64()))
+        schema = schema.append(pa.field("seed_log_offset", pa.int64()))
     rows = []
     for trace, version, label, created in values:
         rows.append(
@@ -103,23 +121,81 @@ def write_grades(directory, name, values):
                 grader="wrong-physical-value",
                 grader_version=version,
                 label=label,
-                p_yes=1.0 if label == "yes" else 0.0,
+                p_yes={"yes": 1.0, "no": 0.0, "unsure": 0.5}[label],
                 reason=None,
                 kind="code",
-                source="live",
+                source=source,
                 model=None,
                 input_hash="hash",
                 cost_usd=0,
                 created_at=created,
+                trace_log_offset=trace_log_offset,
+                seed_log_offset=seed_log_offset,
             )
         )
     folder = directory / "grades" / f"grader={name}"
     folder.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows, schema=schema), folder / "grades.parquet")
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), folder / filename)
 
 
 def dictionaries(result):
     return [dict(zip(result.columns, row, strict=True)) for row in result.rows]
+
+
+def test_many_parquet_files_fit_default_descriptor_limit(tmp_path):
+    started = datetime(2025, 1, 1, tzinfo=UTC)
+    for index in range(512):
+        write_spans(
+            tmp_path,
+            [
+                span(
+                    str(index),
+                    str(index),
+                    started,
+                    replay_of="0" if index == 511 else None,
+                )
+            ],
+            filename=f"{index}-{index + 1}.parquet",
+        )
+    folder = tmp_path / "graders" / SEED_CODE.name
+    folder.mkdir(parents=True)
+    (folder / "v1.yaml").write_text(yaml.safe_dump(asdict(SEED_CODE)))
+    write_grades(
+        tmp_path,
+        SEED_CODE.name,
+        [(str(index), 1, "yes", started) for index in range(510)],
+    )
+    code = """
+import resource
+import sys
+from pathlib import Path
+from hopper.config import Settings
+from hopper.graders.worker import Worker
+from hopper.query import connect
+_, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
+directory = Path(sys.argv[1])
+with connect(directory) as connection:
+    assert connection.execute("SELECT count(*) FROM traces").fetchone()[0] == 512
+    assert connection.execute('''
+        SELECT grader, grader_version, label, count(*) AS traces
+        FROM grades GROUP BY ALL ORDER BY grader, label
+    ''').fetchall() == [("cites_sources", 1, "yes", 510)]
+worker = Worker(Settings(data_dir=directory))
+work, known, deferred = worker._prepare()
+assert set(work) == {"0", "510", "511"}
+assert len(work["510"].pending) == 1 and len(work["510"].spans) == 1
+assert work["511"].replay_of == "0" and work["511"].seed_revision == 0
+assert set(known) == {("0", "cites_sources", 1)}
+assert deferred == set()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("progress", [False, True])
@@ -132,6 +208,7 @@ def test_empty_relations_and_progress_files(tmp_path, progress):
             "spans",
             "traces",
             "grades_all",
+            "_fresh_grade_versions",
             "active_graders",
             "grades",
             "trace_grades",
@@ -190,6 +267,36 @@ def test_only_published_files_and_checks_are_independent(tmp_path):
     result = execute_sql(tmp_path, "SELECT trace_id, passed, criteria::VARCHAR FROM checks")
     assert result.rows == [("checked", False, '{"answer": false}')]
     assert find_traces(tmp_path, FindFilters()).rows == []
+
+
+def test_span_snapshot_waits_for_a_contiguous_published_range(tmp_path):
+    now = datetime.now(UTC)
+    write_spans(tmp_path, [span("trace", "root", now)], filename="0-10.parquet")
+    write_spans(
+        tmp_path,
+        [span("trace", "last", now, parent="root", log_offset=20)],
+        filename="20-30.parquet",
+    )
+    with connect(tmp_path) as snapshot:
+        assert snapshot.execute("SELECT span_count, last_log_offset FROM traces").fetchall() == [
+            (1, 0)
+        ]
+        write_spans(
+            tmp_path,
+            [span("trace", "middle", now, parent="root", log_offset=10)],
+            filename="10-20.parquet",
+        )
+        assert snapshot.execute("SELECT span_count, last_log_offset FROM traces").fetchall() == [
+            (1, 0)
+        ]
+    assert execute_sql(tmp_path, "SELECT span_count, last_log_offset FROM traces").rows == [(3, 20)]
+
+
+def test_named_span_snapshots_remain_readable(tmp_path):
+    write_spans(tmp_path, [span("seed", "root", datetime.now(UTC))], filename="seed.parquet")
+    assert execute_sql(tmp_path, "SELECT trace_id, last_log_offset FROM traces").rows == [
+        ("seed", 0)
+    ]
 
 
 def test_exact_aggregate_and_finished_thresholds(tmp_path):
@@ -260,6 +367,7 @@ def test_exact_aggregate_and_finished_thresholds(tmp_path):
         "has_root": True,
         "first_received_at": complete["first_received_at"],
         "last_received_at": complete["last_received_at"],
+        "last_log_offset": 0,
         "finished": True,
     }
     assert complete["first_received_at"] == complete["last_received_at"]
@@ -386,6 +494,208 @@ def test_current_active_grades_folder_ownership_and_null(tmp_path):
     assert missing["empty"] is None
 
 
+@pytest.mark.parametrize("has_current", [False, True])
+def test_legacy_grades_are_readable_but_cannot_establish_freshness(tmp_path, has_current):
+    now = datetime.now(UTC)
+    write_spans(tmp_path, [span("trace", "root", now)])
+    grader(tmp_path, "grounded")
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("trace", 1, "no", now + timedelta(seconds=1))],
+        filename="legacy.parquet",
+        is_legacy=True,
+    )
+    if has_current:
+        write_grades(tmp_path, "grounded", [("trace", 1, "yes", now)])
+    rows = execute_sql(
+        tmp_path, "SELECT label, trace_log_offset, seed_log_offset FROM grades_all ORDER BY label"
+    ).rows
+    assert rows == [("no", None, None)] + ([("yes", 0, None)] if has_current else [])
+    assert execute_sql(tmp_path, "SELECT label FROM grades").rows == (
+        [("yes",)] if has_current else []
+    )
+
+
+def test_late_publication_invalidates_grade_even_when_receipt_precedes_grading(tmp_path):
+    now = datetime.now(UTC)
+    write_spans(tmp_path, [span("trace", "root", now - timedelta(minutes=2))])
+    grader(tmp_path, "grounded")
+    write_grades(tmp_path, "grounded", [("trace", 1, "no", now)])
+    with connect(tmp_path) as snapshot:
+        write_spans(
+            tmp_path,
+            [span("trace", "late", now - timedelta(minutes=1), parent="root", log_offset=1)],
+            filename="1-2.parquet",
+        )
+        assert snapshot.execute("SELECT last_log_offset FROM traces").fetchall() == [(0,)]
+        assert snapshot.execute("SELECT label FROM grades").fetchall() == [("no",)]
+    assert execute_sql(tmp_path, "SELECT last_log_offset FROM traces").rows == [(1,)]
+    assert execute_sql(
+        tmp_path,
+        "SELECT g.created_at > t.last_received_at FROM grades_all g JOIN traces t USING (trace_id)",
+    ).rows == [(True,)]
+    assert execute_sql(tmp_path, "SELECT * FROM grades").rows == []
+    assert execute_sql(tmp_path, "SELECT grounded FROM trace_grades").rows == [(None,)]
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("trace", 1, "yes", now)],
+        trace_log_offset=1,
+        filename="fresh.parquet",
+    )
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("trace", 1, "no", now + timedelta(seconds=1))],
+        trace_log_offset=2,
+        filename="future-snapshot.parquet",
+    )
+    assert execute_sql(tmp_path, "SELECT label, trace_log_offset FROM grades").rows == [("yes", 1)]
+
+
+def test_newest_fresh_applicable_active_version_wins(tmp_path):
+    now = datetime.now(UTC)
+    write_spans(tmp_path, [span("trace", "root", now, log_offset=10)], filename="0-11.parquet")
+    for version, status in ((1, "active"), (2, "active"), (3, "draft"), (4, "retired")):
+        grader(tmp_path, "grounded", version, status)
+    grader(tmp_path, "grounded", 5, applies_to="other-service")
+    for version in (1, 2, 3, 4, 5):
+        write_grades(
+            tmp_path,
+            "grounded",
+            [("trace", version, "yes", now)],
+            trace_log_offset=9 if version == 2 else 10,
+            filename=f"v{version}.parquet",
+        )
+    assert execute_sql(
+        tmp_path, "SELECT grader_version FROM _fresh_grade_versions ORDER BY grader_version"
+    ).rows == [(1,), (3,), (4,), (5,)]
+    assert execute_sql(tmp_path, "SELECT grader_version FROM grades").rows == [(1,)]
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("trace", 2, "unsure", now - timedelta(seconds=1))],
+        trace_log_offset=10,
+        source="on_demand",
+        filename="v2-fresh.parquet",
+    )
+    assert execute_sql(tmp_path, "SELECT grader_version, label FROM grades").rows == [(2, "unsure")]
+
+
+def test_grade_applicability_uses_root_or_unambiguous_orphan_service(tmp_path):
+    now = datetime.now(UTC)
+    write_spans(
+        tmp_path,
+        [
+            span("rooted", "root", now),
+            span("rooted", "child", now, parent="root", service="other"),
+            span("orphan", "child", now, parent="missing"),
+            span("conflict", "first", now, parent="missing"),
+            span("conflict", "second", now, parent="missing", service="other"),
+            span("other", "root", now, service="other"),
+        ],
+    )
+    grader(tmp_path, "scoped", applies_to="rfi-agent")
+    grader(tmp_path, "universal")
+    for name in ("scoped", "universal"):
+        write_grades(
+            tmp_path,
+            name,
+            [(trace, 1, "yes", now) for trace in ("rooted", "orphan", "conflict", "other")],
+        )
+    assert execute_sql(tmp_path, "SELECT trace_id, service FROM traces ORDER BY trace_id").rows == [
+        ("conflict", None),
+        ("orphan", "rfi-agent"),
+        ("other", "other"),
+        ("rooted", "rfi-agent"),
+    ]
+    assert execute_sql(
+        tmp_path, "SELECT trace_id FROM grades WHERE grader = 'scoped' ORDER BY trace_id"
+    ).rows == [("orphan",), ("rooted",)]
+    assert execute_sql(tmp_path, "SELECT count(*) FROM grades WHERE grader = 'universal'").rows == [
+        (4,)
+    ]
+
+
+def test_replay_grades_track_both_trace_and_seed_revisions_by_exact_version(tmp_path):
+    now = datetime.now(UTC)
+    write_spans(
+        tmp_path,
+        [
+            span("seed", "root", now),
+            span("replay", "root", now, replay_of="seed", log_offset=1),
+            span("missing-seed", "root", now, replay_of="absent", log_offset=1),
+        ],
+        filename="0-2.parquet",
+    )
+    for version in (1, 2):
+        grader(tmp_path, "grounded", version)
+    write_grades(tmp_path, "grounded", [("seed", 1, "yes", now), ("seed", 2, "no", now)])
+    for filename in ("replay.parquet", "repeated-pass.parquet"):
+        write_grades(
+            tmp_path,
+            "grounded",
+            [("replay", 1, "yes", now), ("replay", 2, "no", now), ("missing-seed", 1, "yes", now)],
+            trace_log_offset=1,
+            seed_log_offset=0,
+            source="replayed",
+            filename=filename,
+        )
+    assert execute_sql(
+        tmp_path,
+        "SELECT grader_version, label FROM _fresh_grade_versions "
+        "WHERE trace_id = 'seed' ORDER BY grader_version",
+    ).rows == [(1, "yes"), (2, "no")]
+    assert execute_sql(
+        tmp_path, "SELECT trace_id, grader_version, label FROM grades ORDER BY trace_id"
+    ).rows == [("replay", 2, "no"), ("seed", 2, "no")]
+    write_spans(
+        tmp_path,
+        [span("seed", "late", now - timedelta(seconds=1), parent="root", log_offset=2)],
+        filename="2-3.parquet",
+    )
+    assert execute_sql(tmp_path, "SELECT * FROM grades").rows == []
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("seed", 1, "yes", now)],
+        trace_log_offset=2,
+        filename="fresh-seed.parquet",
+    )
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("replay", 1, "yes", now)],
+        trace_log_offset=1,
+        seed_log_offset=2,
+        source="replayed",
+        filename="fresh-copy.parquet",
+    )
+    assert execute_sql(
+        tmp_path, "SELECT trace_id, grader_version FROM grades ORDER BY trace_id"
+    ).rows == [("replay", 1), ("seed", 1)]
+    write_spans(
+        tmp_path,
+        [span("replay", "late", now, parent="root", replay_of="seed", log_offset=3)],
+        filename="3-4.parquet",
+    )
+    assert execute_sql(tmp_path, "SELECT trace_id FROM grades").rows == [("seed",)]
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("replay", 1, "yes", now)],
+        trace_log_offset=3,
+        seed_log_offset=2,
+        source="replayed",
+        filename="latest-copy.parquet",
+    )
+    assert execute_sql(tmp_path, "SELECT trace_id FROM grades ORDER BY trace_id").rows == [
+        ("replay",),
+        ("seed",),
+    ]
+
+
 def test_quoted_grader_and_hostile_values_are_bound(tmp_path):
     now = datetime.now(UTC)
     name = "grader'\"quote"
@@ -437,7 +747,9 @@ def test_invalid_stored_grader_is_visible(tmp_path, definition):
 
 @pytest.mark.parametrize("names", [("TRACE_ID",), ("same", "SAME")])
 def test_grade_column_collision_is_visible(tmp_path, names, monkeypatch):
-    monkeypatch.setattr("hopper.query._active_graders", lambda _: [(name, 1) for name in names])
+    monkeypatch.setattr(
+        "hopper.query._active_graders", lambda _: [(name, 1, "*") for name in names]
+    )
     with pytest.raises(ValueError, match="collide"):
         execute_sql(tmp_path, "SELECT * FROM trace_grades")
 

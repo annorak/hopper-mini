@@ -17,7 +17,8 @@ from hopper.writer import JSON_COLUMNS, SCHEMA
 
 TRACE_PROJECTION = """
 trace_id,
-any_value(service) FILTER (WHERE parent_span_id IS NULL) AS service,
+coalesce(any_value(service) FILTER (WHERE parent_span_id IS NULL),
+    CASE WHEN count(DISTINCT service) = 1 THEN min(service) END) AS service,
 any_value(name) FILTER (WHERE parent_span_id IS NULL) AS root_name,
 min(start_time) AS start_time,
 max(end_time) AS end_time,
@@ -37,6 +38,7 @@ any_value(eval_case_id) AS eval_case_id,
 bool_or(parent_span_id IS NULL) AS has_root,
 min(received_at) AS first_received_at,
 max(received_at) AS last_received_at,
+max(log_offset) AS last_log_offset,
 (bool_or(parent_span_id IS NULL) AND max(received_at) < now() - INTERVAL 10 SECOND)
     OR max(received_at) < now() - INTERVAL 10 MINUTE AS finished
 """
@@ -53,6 +55,8 @@ GRADE_COLUMNS = {
     "input_hash": "VARCHAR",
     "cost_usd": "DOUBLE",
     "created_at": "TIMESTAMPTZ",
+    "trace_log_offset": "BIGINT",
+    "seed_log_offset": "BIGINT",
 }
 CHECK_COLUMNS = {
     "trace_id": "VARCHAR",
@@ -119,7 +123,7 @@ def _empty_table(connection, name, columns):
     connection.execute(f"CREATE TABLE {name} ({fields})")
 
 
-def _active_graders(data_dir: Path) -> list[tuple[str, int]]:
+def _active_graders(data_dir: Path) -> list[tuple[str, int, str]]:
     active = []
     for path in sorted((data_dir / "graders").glob("*/v*.yaml")):
         definition = yaml.safe_load(path.read_text())
@@ -135,8 +139,21 @@ def _active_graders(data_dir: Path) -> list[tuple[str, int]]:
         ):
             raise ValueError(f"Invalid grader name, version, or status: {path}")
         if definition["status"] == "active":
-            active.append((path.parent.name, version))
+            applies_to = definition.get("applies_to")
+            if not isinstance(applies_to, str) or not applies_to.strip():
+                raise ValueError(f"Invalid grader applies_to: {path}")
+            active.append((path.parent.name, version, applies_to))
     return active
+
+
+def validate_grader_names(connection, names: list[str]) -> None:
+    trace_columns = {
+        column[0].casefold()
+        for column in connection.execute("SELECT * FROM traces LIMIT 0").description
+    }
+    folded_names = [name.casefold() for name in names]
+    if len(set(folded_names)) != len(names) or trace_columns.intersection(folded_names):
+        raise ValueError("Active grader names collide with trace columns or each other")
 
 
 def _grade_projection(names: list[str]) -> str:
@@ -152,13 +169,36 @@ def _grade_projection(names: list[str]) -> str:
     )
 
 
+def _span_snapshot_files(data_dir: Path) -> list[str]:
+    files = []
+    ranges = []
+    for path in (data_dir / "spans").glob("*.parquet"):
+        match = re.fullmatch(r"([0-9]+)-([0-9]+)\.parquet", path.name)
+        if match is None:
+            files.append(str(path))
+        else:
+            start, end = map(int, match.groups())
+            if end <= start:
+                raise ValueError(f"Invalid published span range: {path.name}")
+            ranges.append((start, end, path))
+    position = 0
+    for start, end, path in sorted(ranges):
+        if start < position:
+            raise ValueError(f"Overlapping published span range: {path.name}")
+        if start > position:
+            break
+        files.append(str(path))
+        position = end
+    return sorted(files)
+
+
 @contextmanager
 def connect(data_dir: Path):
     """Open one UTC query snapshot over complete published files, including empty stores."""
-    connection = duckdb.connect()
+    connection = duckdb.connect(config={"threads": 2, "read_ahead_depth": 0})
     try:
         connection.execute("SET TimeZone = 'UTC'")
-        files = sorted(str(path) for path in (Path(data_dir) / "spans").glob("*.parquet"))
+        files = _span_snapshot_files(Path(data_dir))
         if files:
             connection.read_parquet(files, hive_partitioning=False).create_view("_span_files")
         else:
@@ -175,11 +215,14 @@ def connect(data_dir: Path):
             if not files:
                 continue
             relation = f"_grade_{index}"
-            connection.read_parquet(files, hive_partitioning=False).create_view(relation)
+            rows = connection.read_parquet(files, hive_partitioning=False, union_by_name=True)
+            missing = {"trace_log_offset", "seed_log_offset"} - set(rows.columns)
+            rows.create_view(relation)
             grader = folder.name.removeprefix("grader=")
+            expressions = {name: _identifier(name) for name in GRADE_COLUMNS}
+            expressions.update({name: "NULL" for name in missing}, grader=_literal(grader))
             fields = ", ".join(
-                f"{_literal(grader) if name == 'grader' else _identifier(name)}::{kind} "
-                f"AS {_identifier(name)}"
+                f"{expressions[name]}::{kind} AS {_identifier(name)}"
                 for name, kind in GRADE_COLUMNS.items()
             )
             partitions.append(f"SELECT {fields} FROM {relation}")
@@ -187,24 +230,34 @@ def connect(data_dir: Path):
             connection.execute("CREATE VIEW grades_all AS " + " UNION ALL ".join(partitions))
         else:
             _empty_table(connection, "grades_all", GRADE_COLUMNS)
-        connection.execute("CREATE TABLE active_graders (grader VARCHAR, grader_version INTEGER)")
+        connection.execute(
+            "CREATE TABLE active_graders "
+            "(grader VARCHAR, grader_version INTEGER, applies_to VARCHAR)"
+        )
         active = _active_graders(Path(data_dir))
         if active:
-            connection.executemany("INSERT INTO active_graders VALUES (?, ?)", active)
+            connection.executemany("INSERT INTO active_graders VALUES (?, ?, ?)", active)
         connection.execute("""
-            CREATE VIEW grades AS SELECT g.* FROM grades_all g
+            CREATE VIEW _fresh_grade_versions AS SELECT g.* FROM grades_all g
+            JOIN traces t ON t.trace_id = g.trace_id
+            LEFT JOIN traces seed ON seed.trace_id = t.replay_of
+            WHERE g.trace_log_offset = t.last_log_offset
+              AND ((t.replay_of IS NULL AND g.seed_log_offset IS NULL)
+                OR (t.replay_of IS NOT NULL AND g.seed_log_offset = seed.last_log_offset))
+            QUALIFY row_number() OVER (
+                PARTITION BY g.trace_id, g.grader, g.grader_version
+                ORDER BY g.created_at DESC) = 1
+        """)
+        connection.execute("""
+            CREATE VIEW grades AS SELECT g.* FROM _fresh_grade_versions g
             JOIN active_graders a USING (grader, grader_version)
+            JOIN traces t ON t.trace_id = g.trace_id
+            WHERE a.applies_to = '*' OR a.applies_to = t.service
             QUALIFY row_number() OVER (PARTITION BY g.trace_id, g.grader
                 ORDER BY g.grader_version DESC, g.created_at DESC) = 1
         """)
-        names = sorted({name for name, _ in active})
-        trace_columns = {
-            column[0].casefold()
-            for column in connection.execute("SELECT * FROM traces LIMIT 0").description
-        }
-        folded_names = [name.casefold() for name in names]
-        if len(set(folded_names)) != len(names) or trace_columns.intersection(folded_names):
-            raise ValueError("Active grader names collide with trace columns or each other")
+        names = sorted({name for name, _, _ in active})
+        validate_grader_names(connection, names)
         connection.execute(
             "CREATE VIEW trace_grades AS WITH selected AS (SELECT * FROM traces) "
             + _grade_projection(names)

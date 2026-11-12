@@ -10,15 +10,19 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import requests
+import yaml
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 from hopper import stack, wal
 from hopper.config import Settings
+from hopper.graders import SEED_CODE
+from hopper.ledger import Ledger
 
 
 def cli(settings, *arguments):
@@ -28,6 +32,8 @@ def cli(settings, *arguments):
             **os.environ,
             "HOPPER_DATA_DIR": str(settings.data_dir),
             "HOPPER_ENDPOINT": settings.endpoint,
+            "TYPESAFE_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
         },
         capture_output=True,
         text=True,
@@ -79,6 +85,10 @@ def settings():
             listener.bind(("127.0.0.1", 0))
             endpoint = f"http://127.0.0.1:{listener.getsockname()[1]}"
         config = Settings(Path(directory), endpoint=endpoint)
+        Ledger(config).initialize()
+        grader_dir = config.data_dir / "graders" / "cites_sources"
+        grader_dir.mkdir()
+        (grader_dir / "v1.yaml").write_text(yaml.safe_dump(asdict(SEED_CODE)))
         try:
             yield config
         finally:
@@ -100,6 +110,8 @@ def test_concurrent_up_and_down_are_idempotent(settings):
             assert {result["phase"] for result in starts} == {"running"}
             assert len({result["receiver_pid"] for result in starts}) == 1
             assert len({result["supervisor_pid"] for result in starts}) == 1
+            assert len({result["grader_pid"] for result in starts}) == 1
+            assert starts[0]["grader_pid"] is not None
             assert command(settings, "stack", "status")["phase"] == "running"
             stops = list(pool.map(lambda _: command(settings, "stack", "down"), range(3)))
             assert {result["phase"] for result in stops} == {"stopped"}
@@ -148,6 +160,15 @@ def test_sigkill_supervisor_drains_receiver_and_releases_lock(settings):
             return True
 
     wait_for(receiver_exited)
+
+    def grader_exited():
+        try:
+            os.kill(running["grader_pid"], 0)
+            return False
+        except ProcessLookupError:
+            return True
+
+    wait_for(grader_exited)
     assert stack.status(settings)["phase"] == "stopped"
     assert recovered(settings) == [acknowledged]
     replacement = command(settings, "stack", "up")
@@ -320,6 +341,8 @@ def test_foreground_cli_stops_and_recovers(settings, flags):
                 **os.environ,
                 "HOPPER_DATA_DIR": str(settings.data_dir),
                 "HOPPER_ENDPOINT": settings.endpoint,
+                "TYPESAFE_API_KEY": "",
+                "ANTHROPIC_API_KEY": "",
             },
             stdout=output,
             stderr=subprocess.STDOUT,
@@ -387,3 +410,41 @@ def test_up_waits_for_old_writer_to_release_ownership(settings):
     finally:
         if writer is not None:
             writer.close()
+
+
+def test_sigkill_grader_restarts_without_restarting_ingestion(settings):
+    first = command(settings, "stack", "up")
+    os.kill(first["grader_pid"], signal.SIGKILL)
+
+    def restarted():
+        current = stack.status(settings)
+        return (
+            current
+            if current["phase"] == "running" and current["grader_pid"] != first["grader_pid"]
+            else None
+        )
+
+    second = wait_for(restarted)
+    assert second["receiver_pid"] == first["receiver_pid"]
+    assert second["writer_pid"] == first["writer_pid"]
+    assert second["supervisor_pid"] == first["supervisor_pid"]
+    assert not list((settings.data_dir / "grades").glob("grader=*/*.parquet"))
+    assert (settings.data_dir / "ledger.jsonl").read_bytes() == b""
+
+
+def test_grade_work_once_runs_code_only_without_provider_keys(settings):
+    result = cli(settings, "grade", "work", "--once", "--rps", "2", "--usd-per-hour", "0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip()
+    assert (settings.data_dir / "ledger.jsonl").read_bytes() == b""
+
+
+def test_up_waits_for_old_grader_to_release_ownership(settings):
+    with (settings.data_dir / ".grader.lock").open("a+b") as owner:
+        fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            startup = pool.submit(command, settings, "stack", "up")
+            wait_for(lambda: "grader" in (stack.status(settings)["error"] or "").lower())
+            assert not startup.done()
+            fcntl.flock(owner.fileno(), fcntl.LOCK_UN)
+            assert startup.result(timeout=20)["phase"] == "running"
