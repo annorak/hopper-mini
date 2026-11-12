@@ -486,7 +486,8 @@ def test_current_active_grades_folder_ownership_and_null(tmp_path):
         ),
     )
     assert [row["trace_id"] for row in dictionaries(result)] == ["b"]
-    assert result.columns[-3:] == ("answered_question", "empty", "grounded")
+    assert result.columns[-2:] == ("answered_question", "grounded")
+    assert "empty" not in result.columns
     missing = dictionaries(find_traces(tmp_path, FindFilters()))[-1]
     assert missing["trace_id"] == "d"
     assert missing["answered_question"] is None
@@ -1002,6 +1003,39 @@ def test_all_eight_canonical_queries_and_grade_partition_pruning(canonical_store
     }
 
 
+def test_find_profile_reports_only_selected_grader_scans(canonical_store):
+    directory, now, _ = canonical_store
+    write_grades(
+        directory,
+        "answered_question",
+        [("a", 1, "yes", now)],
+        filename="second.parquet",
+    )
+    result = find_traces(
+        directory,
+        FindFilters(
+            start=now - timedelta(days=7),
+            grades=(GradeFilter("answered_question", "yes"), GradeFilter("grounded", "no")),
+        ),
+        profile=True,
+    )
+    assert {row["trace_id"] for row in dictionaries(result)} == {"a", "b"}
+    assert result.profile.grade_folders == (
+        "grades/grader=answered_question",
+        "grades/grader=grounded",
+    )
+    assert result.columns[-2:] == ("answered_question", "grounded")
+    assert "actionable" not in result.columns
+    assert "cites_sources" not in result.columns
+    unfiltered = find_traces(directory, FindFilters(), profile=True)
+    assert unfiltered.profile.grade_folders == (
+        "grades/grader=actionable",
+        "grades/grader=answered_question",
+        "grades/grader=cites_sources",
+        "grades/grader=grounded",
+    )
+
+
 def test_cli_every_flag_json_profile_sql_and_trace(canonical_store, monkeypatch):
     directory, now, _ = canonical_store
     monkeypatch.setenv("HOPPER_DATA_DIR", str(directory))
@@ -1038,8 +1072,13 @@ def test_cli_every_flag_json_profile_sql_and_trace(canonical_store, monkeypatch)
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     assert [(row["trace_id"], row["span_count"]) for row in rows] == [("a", 3)]
-    assert rows[0]["actionable"] == "yes"
+    assert rows[0]["answered_question"] == "yes" and rows[0]["grounded"] == "no"
+    assert "actionable" not in rows[0]
     assert "wall time:" in result.stderr and "row groups scanned:" in result.stderr
+    assert (
+        "grader folders scanned: grades/grader=answered_question, grades/grader=grounded"
+        in result.stderr
+    )
     assert runner.invoke(app, ["find", "--since", "1h", "--status", "ERROR"]).exit_code == 0
     sql = runner.invoke(app, ["sql", "SELECT count(*) AS count FROM spans", "--profile"])
     assert sql.exit_code == 0

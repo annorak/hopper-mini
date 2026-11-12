@@ -300,6 +300,38 @@ def grade_work(
         raise typer.Exit(1) from error
 
 
+@grade_app.command("run")
+def grade_run(
+    grader: Annotated[str, typer.Option(help="Grader name to run.")],
+    where: Annotated[str, typer.Option(help="SQL predicate over traces, for example finished.")],
+    version: Annotated[
+        int | None, typer.Option(min=1, help="Exact version; defaults to latest, including drafts.")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option(min=1, help="Maximum selected traces; omitted means all matches.")
+    ] = None,
+) -> None:
+    """Grade finished, applicable traces now and write on_demand rows."""
+    from hopper.graders.worker import run_on_demand
+
+    try:
+        result = asyncio.run(
+            run_on_demand(
+                Settings.from_env(),
+                grader=grader,
+                version=version,
+                where=where,
+                limit=limit,
+            )
+        )
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(result.render())
+    if result.remaining or result.budget_blocked:
+        raise typer.Exit(1)
+
+
 @app.command()
 def spend() -> None:
     """Report settled spend and outstanding reservations by stage and model."""
@@ -397,7 +429,7 @@ def find_query(
     as_json: Annotated[bool, typer.Option("--json", help="Print a JSON array.")] = False,
     profile: bool = typer.Option(False, help="Print DuckDB query metrics to stderr."),
 ) -> None:
-    """Find complete traces and show every active grader's current label."""
+    """Find complete traces with requested grades, or all active grades without --grade."""
     from hopper.query import FindFilters, find_traces, parse_grade, parse_window
 
     try:

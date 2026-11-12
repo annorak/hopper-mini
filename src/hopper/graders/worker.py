@@ -11,13 +11,15 @@ import sys
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -84,6 +86,26 @@ class WorkerStats:
         )
 
 
+@dataclass(frozen=True)
+class OnDemandResult:
+    grader: str
+    grader_version: int
+    selected: int
+    completed: int
+    seed_grades: int
+    failed_attempts: int
+    cost_usd: Decimal
+    held_usd: Decimal
+    budget_blocked: str | None
+
+    @property
+    def remaining(self) -> int:
+        return self.selected - self.completed
+
+    def render(self) -> str:
+        return json.dumps({**asdict(self), "remaining": self.remaining}, default=str)
+
+
 def _rows(cursor) -> list[dict]:
     names = [column[0] for column in cursor.description]
     return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
@@ -112,7 +134,14 @@ async def _finish_mutation[T](operation: Callable[[], T]) -> T:
 
 
 class Worker:
-    def __init__(self, settings: Settings, *, rps: float = 5, usd_per_hour: Decimal = Decimal("1")):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        rps: float = 5,
+        usd_per_hour: Decimal = Decimal("1"),
+        on_demand: Grader | None = None,
+    ):
         if not math.isfinite(rps) or rps <= 0:
             raise ValueError("rps must be finite and positive")
         self.settings = settings
@@ -132,6 +161,7 @@ class Worker:
         self._scan_offset = None
         self._attempts = Counter()
         self._code_functions = {}
+        self._on_demand = on_demand
 
     async def __aenter__(self) -> "Worker":
         await asyncio.to_thread(self.ledger.initialize)
@@ -143,9 +173,16 @@ class Worker:
             self._lock = None
             raise RuntimeError("Another grader worker owns this data directory") from error
         try:
-            active = [g for g in self.catalog.list_graders() if g.status == "active"]
-            if any(isinstance(g, JevGrader) for g in active) and not self.settings.typesafe_api_key:
-                raise ValueError("TYPESAFE_API_KEY is required for active Jev graders")
+            graders = (
+                [self._on_demand]
+                if self._on_demand is not None
+                else [g for g in self.catalog.list_graders() if g.status == "active"]
+            )
+            if (
+                any(isinstance(g, JevGrader) for g in graders)
+                and not self.settings.typesafe_api_key
+            ):
+                raise ValueError("TYPESAFE_API_KEY is required for selected Jev graders")
             self._corpus = await asyncio.to_thread(load_corpus)
             for path in (self.settings.data_dir / "tmp").glob("grade-*.parquet"):
                 path.unlink()
@@ -367,7 +404,7 @@ class Worker:
             "grader": grader.name,
             "grader_version": grader.version,
             "kind": grader.kind,
-            "source": "live",
+            "source": "on_demand" if self._on_demand is not None else "live",
             "model": grader.model if isinstance(grader, JevGrader) else None,
             "created_at": datetime.now(UTC),
             "trace_log_offset": trace.revision,
@@ -457,11 +494,22 @@ class Worker:
             return []
         with connect(self.settings.data_dir) as connection:
             connection.register("proposed", pa.Table.from_pylist(rows))
+            if self._on_demand is not None:
+                grader = self._on_demand
+                connection.execute(
+                    "CREATE TEMP TABLE publication_graders AS "
+                    "SELECT ? AS grader, ? AS grader_version, ? AS applies_to",
+                    [grader.name, grader.version, grader.applies_to],
+                )
+            else:
+                connection.execute(
+                    "CREATE TEMP VIEW publication_graders AS SELECT * FROM active_graders"
+                )
             current = _rows(
                 connection.execute("""
                 SELECT p.* FROM proposed p
                 JOIN traces t ON t.trace_id = p.trace_id
-                JOIN active_graders a ON a.grader = p.grader
+                JOIN publication_graders a ON a.grader = p.grader
                     AND a.grader_version = p.grader_version
                 LEFT JOIN traces seed ON seed.trace_id = t.replay_of
                 WHERE t.finished AND (a.applies_to = '*' OR a.applies_to = t.service)
@@ -494,6 +542,175 @@ class Worker:
             _sync_directory(folder)
         _sync_directory(self.settings.data_dir / "grades")
         return current
+
+    def _on_demand_work(self, trace_ids: list[str]) -> list[TraceWork]:
+        grader = self._on_demand
+        with connect(self.settings.data_dir) as connection:
+            selected = _rows(
+                connection.execute(
+                    "SELECT * FROM traces WHERE trace_id IN (SELECT unnest(?)) "
+                    "AND finished AND replay_of IS NULL AND (? = '*' OR service = ?)",
+                    [trace_ids, grader.applies_to, grader.applies_to],
+                )
+            )
+            spans = defaultdict(list)
+            for row in _rows(
+                connection.execute(
+                    "SELECT * FROM spans WHERE trace_id IN (SELECT unnest(?))",
+                    [[row["trace_id"] for row in selected]],
+                )
+            ):
+                spans[row["trace_id"]].append(row)
+        return [
+            TraceWork(
+                row["trace_id"],
+                row["last_log_offset"],
+                None,
+                None,
+                (grader,),
+                spans[row["trace_id"]],
+            )
+            for row in selected
+        ]
+
+    async def _grade_on_demand_page(self, trace_ids: list[str]) -> set[str]:
+        completed = set()
+        for _ in range(MAX_FAILURES):
+            pending = [identity for identity in trace_ids if identity not in completed]
+            if not pending or self.stats.budget_blocked:
+                break
+            work = await asyncio.to_thread(self._on_demand_work, pending)
+            rows = await self._grade_originals(work)
+            published = await _finish_mutation(partial(self._publish, rows))
+            completed.update(row["trace_id"] for row in published)
+        self._attempts.clear()
+        for identity in set(trace_ids) - completed:
+            logger.error(
+                "On-demand trace %s has no published grade after at most %s attempts",
+                identity,
+                MAX_FAILURES,
+            )
+        return completed
+
+    def _on_demand_replays(self, trace_ids: list[str]) -> list[dict]:
+        grader = self._on_demand
+        with connect(self.settings.data_dir) as connection:
+            return _rows(
+                connection.execute(
+                    """
+                SELECT g.* REPLACE (
+                    t.trace_id AS trace_id, 'on_demand' AS source, 0.0::DOUBLE AS cost_usd,
+                    now() AS created_at, t.last_log_offset AS trace_log_offset,
+                    seed.last_log_offset AS seed_log_offset
+                )
+                FROM traces t JOIN traces seed ON seed.trace_id = t.replay_of
+                JOIN _fresh_grade_versions g ON g.trace_id = seed.trace_id
+                    AND g.grader = ? AND g.grader_version = ?
+                WHERE t.trace_id IN (SELECT unnest(?)) AND t.finished AND seed.finished
+                    AND seed.replay_of IS NULL
+                    AND (? = '*' OR (t.service = ? AND seed.service = ?))
+                """,
+                    [
+                        grader.name,
+                        grader.version,
+                        trace_ids,
+                        grader.applies_to,
+                        grader.applies_to,
+                        grader.applies_to,
+                    ],
+                )
+            )
+
+    async def _copy_on_demand_page(self, trace_ids: list[str]) -> int:
+        pending = set(trace_ids)
+        for _ in range(MAX_FAILURES):
+            if not pending:
+                break
+            rows = await asyncio.to_thread(self._on_demand_replays, sorted(pending))
+            if not rows:
+                break
+            published = await _finish_mutation(partial(self._publish, rows))
+            pending.difference_update(row["trace_id"] for row in published)
+        for identity in sorted(pending):
+            logger.error(
+                "On-demand replay %s has no current grade: its original seed must be finished "
+                "and applicable with a fresh %s v%s grade, and both revisions must stay current",
+                identity,
+                self._on_demand.name,
+                self._on_demand.version,
+            )
+        return len(trace_ids) - len(pending)
+
+    async def run_on_demand(self, *, where: str, limit: int | None) -> OnDemandResult:
+        if self._lock is None or self._on_demand is None:
+            raise RuntimeError("On-demand grading requires a selected grader and worker context")
+        grader = self._on_demand
+        completed = 0
+        seed_grades = 0
+        with connect(self.settings.data_dir) as selection:
+            predicate = f"SELECT trace_id FROM traces WHERE ({where})"
+            statements = selection.extract_statements(predicate)
+            if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+                raise ValueError("--where must be one SQL predicate over traces")
+            await _finish_mutation(
+                partial(
+                    selection.execute,
+                    "CREATE TEMP TABLE selected AS SELECT * FROM traces "
+                    f"WHERE trace_id IN ({predicate}) AND finished "
+                    "AND (? = '*' OR service = ?) "
+                    "ORDER BY last_received_at DESC, trace_id DESC LIMIT ?",
+                    [grader.applies_to, grader.applies_to, limit],
+                )
+            )
+            selected = selection.execute("SELECT count(*) FROM selected").fetchone()[0]
+            cursor = await _finish_mutation(
+                partial(
+                    selection.execute,
+                    """
+                SELECT t.trace_id, EXISTS (
+                    SELECT 1 FROM selected s WHERE s.trace_id = t.trace_id
+                ) AS is_target
+                FROM traces t
+                WHERE t.trace_id IN (SELECT coalesce(replay_of, trace_id) FROM selected)
+                    AND t.replay_of IS NULL AND t.finished
+                    AND (? = '*' OR t.service = ?)
+                    AND (EXISTS (SELECT 1 FROM selected s WHERE s.trace_id = t.trace_id)
+                        OR NOT EXISTS (SELECT 1 FROM _fresh_grade_versions g
+                            WHERE g.trace_id = t.trace_id AND g.grader = ?
+                                AND g.grader_version = ?))
+                ORDER BY t.last_received_at DESC, t.trace_id DESC
+                """,
+                    [grader.applies_to, grader.applies_to, grader.name, grader.version],
+                )
+            )
+            while page := cursor.fetchmany(BATCH_SIZE):
+                published = await self._grade_on_demand_page([identity for identity, _ in page])
+                completed += sum(
+                    identity in published and is_target for identity, is_target in page
+                )
+                seed_grades += sum(
+                    identity in published and not is_target for identity, is_target in page
+                )
+                if self.stats.budget_blocked:
+                    break
+            cursor = selection.execute(
+                "SELECT trace_id FROM selected WHERE replay_of IS NOT NULL "
+                "ORDER BY last_received_at DESC, trace_id DESC"
+            )
+            while page := cursor.fetchmany(BATCH_SIZE):
+                completed += await self._copy_on_demand_page([row[0] for row in page])
+        cost, held = self._spend()
+        return OnDemandResult(
+            grader.name,
+            grader.version,
+            selected,
+            completed,
+            seed_grades,
+            self.stats.failures,
+            cost - self._starting_cost,
+            held,
+            self.stats.budget_blocked,
+        )
 
     def _has_coverage(self, grader: Grader) -> bool:
         with connect(self.settings.data_dir) as connection:
@@ -563,15 +780,8 @@ class Worker:
                 [self._started_at],
             ).fetchone()
 
-    async def run_pass(self) -> WorkerStats:
-        if self._lock is None:
-            raise RuntimeError("Use Worker as an async context manager")
-        self.stats.budget_blocked = None
-        failures = self.stats.failures
-        work, known, deferred = await asyncio.to_thread(self._prepare)
-        originals = iter(
-            trace for trace in work.values() if trace.replay_of is None and trace.pending
-        )
+    async def _grade_originals(self, work: list[TraceWork]) -> list[dict]:
+        originals = iter(work)
         rows = []
 
         async def consume() -> None:
@@ -581,6 +791,19 @@ class Worker:
         async with asyncio.TaskGroup() as tasks:
             for _ in range(8):
                 tasks.create_task(consume())
+        return rows
+
+    async def run_pass(self) -> WorkerStats:
+        if self._lock is None:
+            raise RuntimeError("Use Worker as an async context manager")
+        if self._on_demand is not None:
+            raise RuntimeError("On-demand workers cannot run automatic passes")
+        self.stats.budget_blocked = None
+        failures = self.stats.failures
+        work, known, deferred = await asyncio.to_thread(self._prepare)
+        rows = await self._grade_originals(
+            [trace for trace in work.values() if trace.replay_of is None and trace.pending]
+        )
         for row in rows:
             known[(row["trace_id"], row["grader"], row["grader_version"])] = row
         for trace in work.values():
@@ -625,6 +848,34 @@ class Worker:
             logger.info("Retired covered grader %s v%s", grader.name, grader.version)
         await asyncio.to_thread(self._refresh_metrics)
         return self.stats
+
+
+async def run_on_demand(
+    settings: Settings,
+    *,
+    grader: str,
+    version: int | None,
+    where: str,
+    limit: int | None,
+) -> OnDemandResult:
+    if limit is not None and limit <= 0:
+        raise ValueError("--limit must be positive")
+    if version is not None and version <= 0:
+        raise ValueError("--version must be positive")
+    if not where.strip():
+        raise ValueError("--where must be a SQL predicate over traces")
+    await asyncio.to_thread(Ledger(settings).initialize)
+    definitions = [
+        definition
+        for definition in Catalog(settings.data_dir).list_graders()
+        if definition.name == grader and (version is None or definition.version == version)
+    ]
+    if not definitions:
+        suffix = f" version {version}" if version is not None else ""
+        raise ValueError(f"Unknown grader {grader}{suffix}")
+    definition = max(definitions, key=lambda item: item.version)
+    async with Worker(settings, on_demand=definition) as worker:
+        return await worker.run_on_demand(where=where, limit=limit)
 
 
 async def run_worker(

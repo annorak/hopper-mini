@@ -167,8 +167,10 @@ hopper trace 0123456789abcdef0123456789abcdef
 hopper trace 0123456789abcdef0123456789abcdef --full
 ```
 
-`find` returns complete traces and every active grader's current label. Span filters can match
-different spans in the same trace. Missing grades remain `NULL`. The default limit is 100.
+`find` returns complete traces. With `--grade`, it shows only the named active graders and
+scans only their grade folders. Repeated grade filters must all match. Without `--grade`, it
+shows every active grader's current label. Span filters can match different spans in the same
+trace. Missing grades remain `NULL`. The default limit is 100.
 `--text` matches a literal substring in attributes without case sensitivity.
 
 `--since` accepts positive durations with `s`, `m`, `h`, `d`, or `w`. It cannot be combined with
@@ -179,7 +181,9 @@ using the invariant that children start no earlier than their root.
 
 `trace` prints the first 200 characters of each input and output message. Truncated messages end
 with `...`. `--full` prints complete messages. `--profile` prints DuckDB's wall time, bytes read,
-row groups scanned and available, and rows scanned to stderr, so `find --json` remains valid JSON.
+row groups scanned and available, rows scanned, and grader folders observed in DuckDB's scan
+operators to stderr, so `find --json` remains valid JSON. These metrics cover query execution
+after view binding; they exclude file metadata reads during setup.
 
 SQL views are `spans`, `traces`, `grades_all`, `active_graders`, `grades`, `trace_grades`, and
 `checks`. Active grader versions come from `graders/<name>/v<version>.yaml`. `grades` selects the
@@ -199,6 +203,32 @@ hopper graders list
 hopper grade work --once
 hopper grade work --rps 5 --usd-per-hour 1
 ```
+
+Run one grader against selected traces, including a draft or retired version:
+
+```sh
+hopper grade run --grader cites_sources --where "service = 'rfi-agent'" --limit 10
+hopper grade run --grader cites_sources --version 2 --where "trace_id = 'example-trace'"
+```
+
+`--where` is a required SQL predicate over `traces`. Omit `--version` to use the latest defined
+version, including drafts. The command selects finished, applicable traces newest first.
+`--limit` caps selected traces; omitting it processes all matches in batches. An explicit run
+judges selected originals again. Replays copy a fresh answer from their original seed at the
+requested version, grading the seed first when needed. These extra seed grades do not count
+toward the limit.
+
+Every new row has `source=on_demand`. Draft and retired answers are readable in `grades_all`.
+They appear in `grades` and `trace_grades` only when that version is active and its trace and
+seed revisions remain current. Promotion exposes existing answers without rewriting grade files.
+
+The JSON result reports the chosen version, selected and completed traces, extra seed grades,
+failed attempts, remaining traces, cost, and held reservations. Successful results persist even
+when other traces fail. An incomplete run or budget block exits nonzero. Logs identify failed
+traces and unresolved replay prerequisites. Each page has bounded retries. A seed that changes
+after its grading stage can leave a replay incomplete; another run grades the new revision. An empty selection
+succeeds. On-demand grading uses the same exclusive worker lock and spend limits as `grade work`.
+A code-only run does not require a TypeSafe key for unrelated active Jev graders.
 
 `init` installs `answered_question`, `grounded`, `actionable`, and `cites_sources`. A minimal
 budgeted probe resolves `jev-latest` to a concrete model version. Repeating `init` preserves

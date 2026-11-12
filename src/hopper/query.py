@@ -94,12 +94,14 @@ class QueryProfile:
     total_row_groups_scanned: int
     total_row_groups_to_scan: int
     total_rows_scanned: int
+    grade_folders: tuple[str, ...]
 
     def render(self) -> str:
         return (
             f"wall time: {self.total_time:.6f}s; bytes read: {self.total_bytes_read}; "
             f"row groups scanned: {self.total_row_groups_scanned}/"
-            f"{self.total_row_groups_to_scan}; rows scanned: {self.total_rows_scanned}"
+            f"{self.total_row_groups_to_scan}; rows scanned: {self.total_rows_scanned}; "
+            f"grader folders scanned: {', '.join(self.grade_folders) or 'none'}"
         )
 
 
@@ -163,9 +165,11 @@ def _grade_projection(names: list[str]) -> str:
         f"max(label) FILTER (WHERE grader = {_literal(name)}) AS {_identifier(name)}"
         for name in names
     )
+    graders = ", ".join(_literal(name) for name in names)
     return (
         f"SELECT t.*, wide.* EXCLUDE (trace_id) FROM selected t LEFT JOIN "
-        f"(SELECT trace_id, {columns} FROM grades GROUP BY trace_id) wide USING (trace_id)"
+        f"(SELECT trace_id, {columns} FROM grades WHERE grader IN ({graders}) "
+        "GROUP BY trace_id) wide USING (trace_id)"
     )
 
 
@@ -294,12 +298,26 @@ def _execute(connection, sql: str, parameters: dict, profile: bool) -> QueryResu
                 try:
                     contents = json.loads(path.read_text())
                     query = contents["query"]
+                    operators = list(contents["operator"])
+                    grade_folders = set()
+                    while operators:
+                        operator = operators.pop()
+                        operators.extend(operator.get("children", []))
+                        info = operator.get("extra_info", {})
+                        if (
+                            info.get("Function") == "PARQUET_SCAN"
+                            and operator["row_groups_scanned"]
+                        ):
+                            grade_folders.update(
+                                re.findall(r"(?:^|/)(grades/grader=[^/]+)/", info["Filename(s)"])
+                            )
                     metrics = QueryProfile(
                         total_time=query["total_time"],
                         total_bytes_read=contents["io"]["total_bytes_read"],
                         total_row_groups_scanned=query["total_row_groups_scanned"],
                         total_row_groups_to_scan=query["total_row_groups_to_scan"],
                         total_rows_scanned=query["total_rows_scanned"],
+                        grade_folders=tuple(sorted(grade_folders)),
                     )
                 except (OSError, KeyError, json.JSONDecodeError) as error:
                     raise RuntimeError(
@@ -380,6 +398,9 @@ def find_traces(data_dir: Path, filters: FindFilters, *, profile: bool = False) 
                 "SELECT DISTINCT grader FROM active_graders ORDER BY grader"
             ).fetchall()
         ]
+        if filters.grades:
+            requested = {grade.grader for grade in filters.grades}
+            names = [name for name in names if name in requested]
         sql = (
             f"WITH aggregated AS ({aggregate}), selected AS ({selected}) "
             + _grade_projection(names)

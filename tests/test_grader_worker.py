@@ -12,13 +12,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import yaml
+from typer.testing import CliRunner
 from typesafe_sdk import NoulAnswer, SystemOneResponse, Usage
 
 from hopper import ledger as ledger_module
+from hopper.cli import app
 from hopper.config import JevBudget, JevUsage, Settings
 from hopper.graders import Catalog, read_definition
 from hopper.graders import jev as jev_module
@@ -159,6 +162,336 @@ def environment(tmp_path, monkeypatch):
     factory = Mock(return_value=sdk)
     monkeypatch.setattr(jev_module, "AsyncTypeSafeClient", factory)
     return settings, sdk, factory
+
+
+def test_on_demand_draft_is_hidden_until_promotion_and_repeated_rows_stay_current(environment):
+    settings, sdk, factory = environment
+    Catalog(settings.data_dir).install_seeds(lambda: MODEL)
+    write_grader(settings.data_dir, "cites_sources", version=2, kind="code", status="draft")
+    publish(settings.data_dir, make_trace("chosen") + make_trace("excluded", log_offset=10))
+    settings = replace(settings, typesafe_api_key=None)
+    for _ in range(2):
+        asyncio.run(
+            worker_module.run_on_demand(
+                settings,
+                grader="cites_sources",
+                version=None,
+                where="trace_id = 'chosen'",
+                limit=1,
+            )
+        )
+    rows = grade_rows(settings.data_dir)
+    assert len(rows) == 2
+    assert {
+        (row["trace_id"], row["grader_version"], row["source"], row["label"]) for row in rows
+    } == {
+        ("chosen", 2, "on_demand", "yes"),
+    }
+    assert grade_rows(settings.data_dir, "grades") == []
+    Catalog(settings.data_dir).promote("cites_sources", 2, run_code_tests=lambda grader: None)
+    [current] = grade_rows(settings.data_dir, "grades")
+    assert current["grader_version"] == 2 and current["source"] == "on_demand"
+    assert read_definition(settings.data_dir / "graders/cites_sources/v1.yaml").status == "active"
+    assert sdk.system_one.await_count == 0
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["draft", "active", "retired"])
+def test_on_demand_jev_uses_exact_version_and_pinned_model(environment, status):
+    settings, sdk, _ = environment
+    write_grader(settings.data_dir, version=1)
+    write_grader(settings.data_dir, version=2, model="jev-1.15.0", status=status)
+    publish(settings.data_dir, make_trace("chosen"))
+    asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="grounded",
+            version=2,
+            where="TRUE",
+            limit=None,
+        )
+    )
+    [row] = grade_rows(settings.data_dir)
+    assert (row["grader_version"], row["source"], row["model"]) == (2, "on_demand", "jev-1.15.0")
+    assert sdk.system_one.await_args.kwargs["model"] == "jev-1.15.0"
+    assert set(sdk.system_one.await_args.kwargs["questions"]) == {"grounded_v2"}
+    assert bool(grade_rows(settings.data_dir, "grades")) == (status == "active")
+
+
+def test_on_demand_limit_follows_eligibility_and_reads_all_batches(environment, monkeypatch):
+    settings, _, _ = environment
+    write_grader(settings.data_dir, "cites_sources", kind="code", status="draft")
+    rows = make_trace("unfinished", received_at=datetime.now(UTC))
+    rows += make_trace("inapplicable", service="other", log_offset=10)
+    for index in range(5):
+        rows += make_trace(f"eligible-{index}", log_offset=20 + index * 10)
+    publish(settings.data_dir, rows)
+    monkeypatch.setattr(worker_module, "BATCH_SIZE", 2)
+    asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="cites_sources",
+            version=1,
+            where="TRUE",
+            limit=1,
+        )
+    )
+    assert len(grade_rows(settings.data_dir)) == 1
+    asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="cites_sources",
+            version=1,
+            where="TRUE",
+            limit=None,
+        )
+    )
+    assert {row["trace_id"] for row in grade_rows(settings.data_dir)} == {
+        f"eligible-{index}" for index in range(5)
+    }
+    assert len(grade_rows(settings.data_dir)) == 6
+
+
+def test_on_demand_replay_grades_missing_seed_with_exact_version(environment):
+    settings, _, _ = environment
+    write_grader(settings.data_dir, "cites_sources", kind="code", status="draft")
+    publish(
+        settings.data_dir,
+        make_trace("seed", log_offset=10) + make_trace("replay", log_offset=20, replay_of="seed"),
+    )
+    asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="cites_sources",
+            version=1,
+            where="trace_id = 'replay'",
+            limit=1,
+        )
+    )
+    rows = {row["trace_id"]: row for row in grade_rows(settings.data_dir)}
+    assert rows.keys() == {"seed", "replay"}
+    assert {row["source"] for row in rows.values()} == {"on_demand"}
+    assert rows["replay"]["seed_log_offset"] == 11
+    assert rows["replay"]["trace_log_offset"] == 21
+    assert rows["replay"]["input_hash"] == rows["seed"]["input_hash"]
+    assert rows["replay"]["cost_usd"] == 0
+    assert grade_rows(settings.data_dir, "grades") == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"grader": "missing"},
+        {"version": 99},
+        {"limit": 0},
+        {"where": ""},
+        {"where": "missing_column = 1"},
+        {"where": "TRUE); SELECT 1; --"},
+    ],
+)
+def test_on_demand_rejects_invalid_selection_before_dispatch(environment, arguments):
+    settings, sdk, _ = environment
+    write_grader(settings.data_dir, status="draft")
+    publish(settings.data_dir, make_trace("chosen"))
+    options = dict(grader="grounded", version=1, where="TRUE", limit=None)
+    options.update(arguments)
+    with pytest.raises((ValueError, duckdb.Error)):
+        asyncio.run(worker_module.run_on_demand(settings, **options))
+    sdk.system_one.assert_not_called()
+    assert grade_rows(settings.data_dir) == []
+
+
+def test_on_demand_cli_preserves_success_and_reports_incomplete_traces(environment, monkeypatch):
+    settings, _, _ = environment
+    write_grader(settings.data_dir, "cites_sources", kind="code", status="draft")
+    invalid = make_trace("bad", log_offset=10)
+    invalid[0]["attributes"] = '{"gen_ai.output.messages":"invalid-json"}'
+    publish(settings.data_dir, make_trace("good") + invalid)
+    monkeypatch.setenv("HOPPER_DATA_DIR", str(settings.data_dir))
+    result = CliRunner().invoke(
+        app,
+        [
+            "grade",
+            "run",
+            "--grader",
+            "cites_sources",
+            "--where",
+            "TRUE",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    summary = json.loads(result.stdout)
+    assert (summary["selected"], summary["completed"], summary["remaining"]) == (2, 1, 1)
+    assert summary["failed_attempts"] == 3
+    assert [row["trace_id"] for row in grade_rows(settings.data_dir)] == ["good"]
+
+
+def test_on_demand_budget_block_keeps_missing_grade_and_never_dispatches(environment):
+    settings, sdk, _ = environment
+    settings = replace(settings, spend_cap_usd=Decimal("0"))
+    write_grader(settings.data_dir, status="draft")
+    publish(settings.data_dir, make_trace("chosen"))
+    result = asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="grounded",
+            version=1,
+            where="TRUE",
+            limit=None,
+        )
+    )
+    assert result.remaining == 1 and result.budget_blocked
+    assert result.cost_usd == result.held_usd == 0
+    sdk.system_one.assert_not_called()
+    assert grade_rows(settings.data_dir) == []
+
+
+def test_on_demand_late_spans_are_bounded_and_cannot_publish_stale_grades(environment, monkeypatch):
+    from hopper.graders import code
+
+    settings, _, _ = environment
+    write_grader(settings.data_dir, "cites_sources", kind="code", status="draft")
+    publish(settings.data_dir, make_trace("chosen"))
+    judge = code.cites_sources
+    calls = []
+
+    def add_late_span(state, corpus):
+        calls.append(state)
+        [_, late] = make_trace("chosen", log_offset=len(calls) * 10)
+        late["span_id"] = f"late-{len(calls)}"
+        publish(settings.data_dir, [late], f"late-{len(calls)}")
+        return judge(state, corpus)
+
+    monkeypatch.setattr(code, "cites_sources", add_late_span)
+    result = asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="cites_sources",
+            version=1,
+            where="TRUE",
+            limit=None,
+        )
+    )
+    assert len(calls) == 3
+    assert result.remaining == 1 and result.completed == 0
+    assert grade_rows(settings.data_dir) == []
+    monkeypatch.setattr(code, "cites_sources", judge)
+    recovered = asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="cites_sources",
+            version=1,
+            where="TRUE",
+            limit=None,
+        )
+    )
+    assert recovered.completed == 1
+    assert grade_rows(settings.data_dir)[0]["trace_log_offset"] == 31
+
+
+def test_on_demand_selection_is_fixed_and_shared_seed_is_judged_once(environment, monkeypatch):
+    settings, sdk, _ = environment
+    write_grader(settings.data_dir, status="draft")
+    rows = make_trace("seed", log_offset=10)
+    for index in range(5):
+        rows += make_trace(f"replay-{index}", replay_of="seed", log_offset=20 + index * 10)
+    publish(settings.data_dir, rows)
+    monkeypatch.setattr(worker_module, "BATCH_SIZE", 2)
+    result = asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="grounded",
+            version=1,
+            where="replay_of IS NOT NULL AND NOT EXISTS (SELECT 1 FROM grades_all)",
+            limit=None,
+        )
+    )
+    assert (result.selected, result.completed, result.seed_grades) == (5, 5, 1)
+    assert sdk.system_one.await_count == 1
+    assert len(grade_rows(settings.data_dir)) == 6
+
+
+@pytest.mark.parametrize("seed_kind", ["missing", "unfinished", "inapplicable", "nested"])
+def test_on_demand_replay_requires_valid_seed_and_reports_why(environment, caplog, seed_kind):
+    settings, _, _ = environment
+    write_grader(settings.data_dir, "cites_sources", kind="code", status="draft")
+    rows = make_trace("replay", replay_of="seed", log_offset=20)
+    if seed_kind != "missing":
+        rows += make_trace(
+            "seed",
+            log_offset=10,
+            received_at=datetime.now(UTC) if seed_kind == "unfinished" else RECEIVED,
+            service="other" if seed_kind == "inapplicable" else "rfi-agent",
+            replay_of="ancestor" if seed_kind == "nested" else None,
+        )
+    publish(settings.data_dir, rows)
+    result = asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            grader="cites_sources",
+            version=1,
+            where="trace_id = 'replay'",
+            limit=1,
+        )
+    )
+    assert (result.selected, result.completed, result.remaining) == (1, 0, 1)
+    assert "On-demand replay replay has no current grade" in caplog.text
+    assert grade_rows(settings.data_dir) == []
+
+
+@pytest.mark.parametrize("changed", ["replay", "seed"])
+def test_on_demand_rechecks_both_replay_revisions_before_publishing(
+    environment, monkeypatch, changed
+):
+    settings, _, _ = environment
+    write_grader(settings.data_dir, "cites_sources", kind="code", status="draft")
+    publish(
+        settings.data_dir,
+        make_trace("seed", log_offset=10) + make_trace("replay", log_offset=20, replay_of="seed"),
+    )
+    options = dict(grader="cites_sources", version=1, limit=1)
+    asyncio.run(worker_module.run_on_demand(settings, where="trace_id = 'seed'", **options))
+    publish_grades = Worker._publish
+    copy_attempts = []
+
+    def change_before_copy(worker, rows):
+        if any(row["seed_log_offset"] is not None for row in rows):
+            if not copy_attempts:
+                [_, late] = make_trace(
+                    changed,
+                    log_offset=30,
+                    replay_of="seed" if changed == "replay" else None,
+                )
+                late["span_id"] = "late"
+                publish(settings.data_dir, [late], "late")
+            copy_attempts.append(rows)
+        return publish_grades(worker, rows)
+
+    monkeypatch.setattr(Worker, "_publish", change_before_copy)
+    result = asyncio.run(
+        worker_module.run_on_demand(
+            settings,
+            where="trace_id = 'replay'",
+            **options,
+        )
+    )
+    if changed == "replay":
+        assert result.completed == 1 and result.remaining == 0
+        assert len(copy_attempts) == 2
+    else:
+        assert result.completed == 0 and result.remaining == 1
+        assert len(copy_attempts) == 1
+        result = asyncio.run(
+            worker_module.run_on_demand(
+                settings,
+                where="trace_id = 'replay'",
+                **options,
+            )
+        )
+        assert result.completed == result.seed_grades == 1
+    [copied] = [row for row in grade_rows(settings.data_dir) if row["trace_id"] == "replay"]
+    assert copied["trace_log_offset"] == (31 if changed == "replay" else 21)
+    assert copied["seed_log_offset"] == (31 if changed == "seed" else 11)
 
 
 def test_finished_seed_coverage_groups_questions_and_leaves_missing_missing(environment):
