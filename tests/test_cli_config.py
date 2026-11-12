@@ -12,7 +12,14 @@ from typesafe_sdk import NoulAnswer, SystemOneResponse, Usage
 
 from hopper.cli import app
 from hopper.config import DATA_DIRECTORIES, Settings
-from hopper.graders import SEED_CODE, Catalog
+from hopper.graders import (
+    SEED_CODE,
+    Catalog,
+    ThresholdValidation,
+    Validation,
+    definition_fingerprint,
+    threshold_pairs,
+)
 from hopper.graders import jev as jev_module
 from hopper.ledger import Ledger
 
@@ -187,10 +194,21 @@ def test_jev_promotion_validation_and_retirement_use_catalog(environment):
     assert runner.invoke(app, ["graders", "new", str(definition)]).exit_code == 0
     rejected = runner.invoke(app, ["graders", "promote", "answer_complete", "--version", "1"])
     assert rejected.exit_code == 1 and "50 labels" in rejected.output
-    path = data_dir / "graders" / "answer_complete" / "v1.yaml"
-    document = yaml.safe_load(path.read_text())
-    document["validation"] = {"labels": 50, "agreement": 0.9}
-    path.write_text(yaml.safe_dump(document))
+    catalog = Catalog(data_dir)
+    [grader] = catalog.list_graders()
+    catalog.save_validation(
+        grader,
+        Validation(
+            labels=50,
+            agreement=0.9,
+            threshold_sweep=tuple(
+                ThresholdValidation(no, yes, 0.9, None, None) for no, yes in threshold_pairs(grader)
+            ),
+            validated_at="2026-11-11T00:00:00+00:00",
+            definition_hash=definition_fingerprint(grader),
+            labels_hash="0" * 64,
+        ),
+    )
     promoted = runner.invoke(app, ["graders", "promote", "answer_complete", "--version", "1"])
     assert promoted.exit_code == 0, promoted.output
     assert json.loads(promoted.output)["status"] == "active"

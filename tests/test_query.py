@@ -21,6 +21,7 @@ from hopper.query import (
     connect,
     execute_sql,
     find_traces,
+    grader_coverage,
     parse_grade,
     parse_window,
     read_trace,
@@ -140,6 +141,71 @@ def write_grades(
 
 def dictionaries(result):
     return [dict(zip(result.columns, row, strict=True)) for row in result.rows]
+
+
+def test_coverage_keeps_each_active_version_and_missing_outcomes(tmp_path, monkeypatch):
+    now = datetime.now(UTC)
+    old = now - timedelta(minutes=2)
+    write_spans(
+        tmp_path,
+        [span(name, "root", old) for name in ("yes", "no", "unsure", "missing", "stale")]
+        + [
+            span("stale", "late", old, parent="root", log_offset=1),
+            span("replay", "root", old, replay_of="stale"),
+            span("other", "root", old, service="other"),
+            span("unfinished", "root", now),
+        ],
+    )
+    for version in (1, 2):
+        grader(tmp_path, "grounded", version, applies_to="rfi-agent")
+    grader(tmp_path, "draft", status="draft")
+    grader(tmp_path, "empty", applies_to="absent-service")
+    write_grades(
+        tmp_path,
+        "grounded",
+        [(name, 1, name, now) for name in ("yes", "no", "unsure")]
+        + [("stale", 1, "no", now), ("yes", 2, "no", now)],
+    )
+    write_grades(
+        tmp_path,
+        "grounded",
+        [("replay", 1, "no", now)],
+        seed_log_offset=0,
+        filename="stale-replay.parquet",
+    )
+    with connect(tmp_path) as connection:
+        rows = grader_coverage(connection)
+    assert rows == [
+        dict(
+            grader="empty", grader_version=1, finished=0, graded=0, missing=0, yes=0, no=0, unsure=0
+        ),
+        dict(
+            grader="grounded",
+            grader_version=1,
+            finished=6,
+            graded=3,
+            missing=3,
+            yes=1,
+            no=1,
+            unsure=1,
+        ),
+        dict(
+            grader="grounded",
+            grader_version=2,
+            finished=6,
+            graded=1,
+            missing=5,
+            yes=0,
+            no=1,
+            unsure=0,
+        ),
+    ]
+    monkeypatch.setenv("HOPPER_DATA_DIR", str(tmp_path))
+    result = runner.invoke(app, ["graders", "coverage"])
+    assert result.exit_code == 0, result.output
+    assert "grounded\t1\t6\t3\t1\t1\t1\t3\t50.00%" in result.output
+    assert "grounded\t2\t6\t1\t0\t1\t0\t5\t16.67%" in result.output
+    assert "empty\t1\t0\t0\t0\t0\t0\t0\tn/a" in result.output
 
 
 def test_many_parquet_files_fit_default_descriptor_limit(tmp_path):

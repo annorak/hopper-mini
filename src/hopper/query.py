@@ -112,6 +112,25 @@ class QueryResult:
     profile: QueryProfile | None = None
 
 
+def grader_coverage(connection) -> list[dict]:
+    cursor = connection.execute("""
+        SELECT a.grader, a.grader_version, count(t.trace_id) AS finished,
+            count(g.trace_id) AS graded,
+            count(t.trace_id) - count(g.trace_id) AS missing,
+            count(*) FILTER (WHERE g.label = 'yes') AS yes,
+            count(*) FILTER (WHERE g.label = 'no') AS no,
+            count(*) FILTER (WHERE g.label = 'unsure') AS unsure
+        FROM active_graders a
+        LEFT JOIN traces t ON t.finished
+            AND (a.applies_to = '*' OR t.service = a.applies_to)
+        LEFT JOIN _fresh_grade_versions g ON g.trace_id = t.trace_id
+            AND g.grader = a.grader AND g.grader_version = a.grader_version
+        GROUP BY a.grader, a.grader_version ORDER BY a.grader, a.grader_version
+    """)
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
 def _identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 

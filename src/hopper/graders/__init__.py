@@ -1,9 +1,12 @@
 import fcntl
+import hashlib
+import json
 import os
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -18,9 +21,24 @@ Origin = Literal["seed", "human", "discovered"]
 
 
 @dataclass(frozen=True)
+class ThresholdValidation:
+    no_threshold: float
+    yes_threshold: float
+    agreement: float | None
+    precision_no: float | None
+    recall_no: float | None
+
+
+@dataclass(frozen=True)
 class Validation:
     labels: int
-    agreement: float
+    agreement: float | None
+    precision_no: float | None = None
+    recall_no: float | None = None
+    threshold_sweep: tuple[ThresholdValidation, ...] = ()
+    validated_at: str | None = None
+    definition_hash: str | None = None
+    labels_hash: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -77,6 +95,103 @@ def _probability(value: object, name: str) -> float:
     return float(value)
 
 
+def _parse_metrics(document: dict, labels: int) -> dict[str, float | None]:
+    values = {}
+    for name in ("agreement", "precision_no", "recall_no"):
+        value = document[name]
+        values[name] = None if value is None else _probability(value, name)
+        if labels == 0 and value is not None:
+            raise ValueError("Validation metrics must be null when labels is zero")
+    if labels > 0 and values["agreement"] is None:
+        raise ValueError("Validation agreement cannot be null when labels is positive")
+    return values
+
+
+def _parse_validation(document: dict) -> Validation:
+    legacy = {"labels", "agreement"}
+    full = legacy | {
+        "precision_no",
+        "recall_no",
+        "threshold_sweep",
+        "validated_at",
+        "definition_hash",
+        "labels_hash",
+    }
+    if document.keys() not in (legacy, full):
+        raise ValueError("Validation has missing or unknown fields")
+    labels = document["labels"]
+    if type(labels) is not int or labels < 0:
+        raise ValueError("Validation labels must be a nonnegative integer")
+    if document.keys() == legacy:
+        return Validation(labels, _probability(document["agreement"], "agreement"))
+    data = dict(document, **_parse_metrics(document, labels))
+    validated_at = _text(data["validated_at"], "validated_at")
+    try:
+        timestamp = datetime.fromisoformat(validated_at)
+    except ValueError as error:
+        raise ValueError("validated_at must be an ISO timestamp with a timezone") from error
+    if timestamp.utcoffset() is None:
+        raise ValueError("validated_at must be an ISO timestamp with a timezone")
+    for name in ("definition_hash", "labels_hash"):
+        if not re.fullmatch(r"[0-9a-f]{64}", _text(data[name], name)):
+            raise ValueError(f"{name} must be a SHA-256 hex digest")
+    sweep = data["threshold_sweep"]
+    if not isinstance(sweep, list) or not sweep:
+        raise ValueError("threshold_sweep must be a nonempty list")
+    rows = []
+    pairs = set()
+    for row in sweep:
+        if not isinstance(row, dict) or row.keys() != {
+            "no_threshold",
+            "yes_threshold",
+            "agreement",
+            "precision_no",
+            "recall_no",
+        }:
+            raise ValueError("Threshold validation has missing or unknown fields")
+        no = _probability(row["no_threshold"], "no_threshold")
+        yes = _probability(row["yes_threshold"], "yes_threshold")
+        if no >= yes or (no, yes) in pairs:
+            raise ValueError("Threshold pairs must be distinct with no_threshold < yes_threshold")
+        pairs.add((no, yes))
+        rows.append(ThresholdValidation(no, yes, **_parse_metrics(row, labels)))
+    data["threshold_sweep"] = tuple(rows)
+    return Validation(**data)
+
+
+def definition_fingerprint(grader: JevGrader) -> str:
+    document = asdict(grader)
+    del document["status"], document["validation"]
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def threshold_pairs(grader: JevGrader) -> tuple[tuple[float, float], ...]:
+    pairs = [(0.1, 0.9), (0.2, 0.8), (0.3, 0.7), (0.4, 0.6)]
+    current = (grader.no_threshold, grader.yes_threshold)
+    if current not in pairs:
+        pairs.append(current)
+    return tuple(pairs)
+
+
+def _check_validation(grader: JevGrader, report: Validation) -> None:
+    if report.definition_hash != definition_fingerprint(grader):
+        raise ValueError("Validation requires a full report bound to the current grader definition")
+    document = asdict(report)
+    document["threshold_sweep"] = list(document["threshold_sweep"])
+    report = _parse_validation(document)
+    rows = {(row.no_threshold, row.yes_threshold): row for row in report.threshold_sweep}
+    if rows.keys() != set(threshold_pairs(grader)):
+        raise ValueError("Validation threshold sweep must include all required threshold pairs")
+    current = rows[(grader.no_threshold, grader.yes_threshold)]
+    if (report.agreement, report.precision_no, report.recall_no) != (
+        current.agreement,
+        current.precision_no,
+        current.recall_no,
+    ):
+        raise ValueError("Validation metrics must match the configured threshold row")
+
+
 def validate_model(value: object) -> str:
     model = _text(value, "model")
     if not re.fullmatch(r"jev-[0-9]+\.[0-9]+\.[0-9]+", model):
@@ -120,12 +235,7 @@ def _parse(document: object, resolve_model: Callable[[], str] | None = None) -> 
     if validation is not None:
         if kind != "jev" or not isinstance(validation, dict):
             raise ValueError("Only Jev graders accept label validation")
-        if validation.keys() != {"labels", "agreement"}:
-            raise ValueError("Validation requires labels and agreement")
-        labels = validation["labels"]
-        if type(labels) is not int or labels < 0:
-            raise ValueError("Validation labels must be a nonnegative integer")
-        data["validation"] = Validation(labels, _probability(validation["agreement"], "agreement"))
+        data["validation"] = _parse_validation(validation)
     if kind == "code":
         function = _text(data["function"], "function")
         if not re.fullmatch(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*", function):
@@ -247,8 +357,14 @@ class Catalog:
         path = self._path(grader.name, grader.version)
         path.parent.mkdir(exist_ok=True)
         temporary = path.parent / f".v{grader.version}-{uuid4()}.tmp"
+        document = asdict(grader)
+        if grader.validation is not None and grader.validation.definition_hash is None:
+            document["validation"] = {
+                "labels": grader.validation.labels,
+                "agreement": grader.validation.agreement,
+            }
         with temporary.open("x", encoding="utf-8") as output:
-            yaml.safe_dump(asdict(grader), output, sort_keys=False)
+            yaml.safe_dump(document, output, sort_keys=False)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
@@ -294,13 +410,31 @@ class Catalog:
                 validate_grader_names(connection, [grader.name])
             if isinstance(grader, JevGrader):
                 validation = grader.validation
-                if validation is None or validation.labels < 50 or validation.agreement < 0.85:
+                if (
+                    validation is None
+                    or validation.labels < 50
+                    or validation.agreement is None
+                    or validation.agreement < 0.85
+                ):
                     raise ValueError("Promotion requires at least 50 labels and 0.85 agreement")
+                _check_validation(grader, validation)
             else:
                 run_code_tests(grader)
             promoted = replace(grader, status="active")
             self._write(promoted)
         return promoted
+
+    def save_validation(self, expected_grader: JevGrader, report: Validation) -> JevGrader:
+        _check_validation(expected_grader, report)
+        with self._locked():
+            current = read_definition(self._path(expected_grader.name, expected_grader.version))
+            if not isinstance(current, JevGrader) or definition_fingerprint(
+                current
+            ) != definition_fingerprint(expected_grader):
+                raise ValueError("Grader definition changed during validation; validate it again")
+            validated = replace(current, validation=report)
+            self._write(validated)
+        return validated
 
     def retire(self, name: str, version: int) -> Grader:
         with self._locked():

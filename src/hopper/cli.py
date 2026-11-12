@@ -191,6 +191,26 @@ def graders_list() -> None:
         )
 
 
+@graders_app.command("coverage")
+def graders_coverage() -> None:
+    """Report fresh grades and missing outcomes for each active grader version."""
+    from hopper.query import connect, grader_coverage
+
+    try:
+        with connect(Settings.from_env().data_dir) as connection:
+            rows = grader_coverage(connection)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo("grader\tversion\tfinished\tgraded\tyes\tno\tunsure\tmissing\tcoverage")
+    for row in rows:
+        coverage = f"{row['graded'] / row['finished']:.2%}" if row["finished"] else "n/a"
+        typer.echo(
+            f"{row['grader']}\t{row['grader_version']}\t{row['finished']}\t{row['graded']}\t"
+            f"{row['yes']}\t{row['no']}\t{row['unsure']}\t{row['missing']}\t{coverage}"
+        )
+
+
 @graders_app.command("new")
 def graders_new(
     definition: Annotated[Path, typer.Argument(help="YAML draft without version or status.")],
@@ -209,6 +229,83 @@ def graders_new(
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(1) from error
     typer.echo(json.dumps(asdict(grader)))
+
+
+@graders_app.command("validate")
+def graders_validate(
+    name: Annotated[str | None, typer.Argument(help="Jev grader name.")] = None,
+    version: Annotated[int | None, typer.Option(min=1, help="Exact grader version.")] = None,
+    all_graders: Annotated[
+        bool, typer.Option("--all", help="Validate every non-retired Jev version.")
+    ] = False,
+    labels_dir: Annotated[
+        Path | None, typer.Option(help="Golden labels directory; defaults to datasets/labels.")
+    ] = None,
+    rps: Annotated[float, typer.Option(min=0.001, help="Maximum Jev requests per second.")] = 5,
+    usd_per_hour: Annotated[str, typer.Option(help="Rolling hourly grading budget in USD.")] = "1",
+) -> None:
+    """Judge saved human-labeled states and persist agreement and threshold metrics."""
+    from hopper.graders import Catalog, JevGrader
+    from hopper.graders.validation import validate_graders
+    from hopper.labels import DEFAULT_LABELS_DIR
+
+    try:
+        if all_graders and (name is not None or version is not None):
+            raise ValueError("--all cannot be combined with a grader name or --version")
+        if not all_graders and name is None:
+            raise ValueError("Specify a grader name with optional --version, or --all")
+        settings = Settings.from_env()
+        definitions = Catalog(settings.data_dir).list_graders()
+        if all_graders:
+            selected = [
+                item
+                for item in definitions
+                if isinstance(item, JevGrader) and item.status != "retired"
+            ]
+        else:
+            selected = [
+                item
+                for item in definitions
+                if item.name == name and (version is None or item.version == version)
+            ][-1:]
+            if not selected:
+                raise ValueError(f"Unknown grader or version: {name}")
+            if not isinstance(selected[0], JevGrader):
+                raise ValueError("Code graders are validated by their unit tests")
+        results = asyncio.run(
+            validate_graders(
+                settings,
+                selected,
+                labels_dir or DEFAULT_LABELS_DIR,
+                rps=rps,
+                usd_per_hour=money(usd_per_hour, "usd_per_hour"),
+            )
+        )
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    def metric(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.3f}"
+
+    typer.echo("grader\tversion\tlabels\tagreement\tprecision_no\trecall_no")
+    for grader, report in results:
+        typer.echo(
+            f"{grader.name}\t{grader.version}\t{report.labels}\t{metric(report.agreement)}\t"
+            f"{metric(report.precision_no)}\t{metric(report.recall_no)}"
+        )
+    if all_graders:
+        typer.echo("Code graders use unit tests and are excluded from label validation.")
+    if results and not any(report.labels for _, report in results):
+        typer.echo("No human labels recorded. Run hopper label before measuring agreement.")
+    for grader, report in results:
+        typer.echo(f"Threshold sweep for {grader.name} v{grader.version}")
+        typer.echo("no_threshold\tyes_threshold\tagreement\tprecision_no\trecall_no")
+        for row in report.threshold_sweep:
+            typer.echo(
+                f"{row.no_threshold:g}\t{row.yes_threshold:g}\t{metric(row.agreement)}\t"
+                f"{metric(row.precision_no)}\t{metric(row.recall_no)}"
+            )
 
 
 def _run_code_grader_tests(grader, test_targets: list[str]) -> None:
@@ -496,7 +593,63 @@ def replay_traces(
         )
 
 
-for name in "label bench chaos evals climb report".split():
+@app.command("label")
+def label_traces_command(
+    grader: Annotated[list[str], typer.Option(help="Jev grader name; repeat for each question.")],
+    n: Annotated[
+        int, typer.Option(min=1, help="Target saved labels per grader, including prior answers.")
+    ] = 50,
+    labels_dir: Annotated[
+        Path | None, typer.Option(help="Golden labels directory; defaults to datasets/labels.")
+    ] = None,
+) -> None:
+    """Review exact trace states and durably save explicit human yes/no answers."""
+    from hopper.graders import Catalog, JevGrader
+    from hopper.labels import DEFAULT_LABELS_DIR, label_traces
+
+    def ask(question: str) -> str:
+        while True:
+            answer = typer.prompt(f"{question} [yes/no/quit]").strip().lower()
+            if answer in ("yes", "y"):
+                return "yes"
+            if answer in ("no", "n"):
+                return "no"
+            if answer in ("quit", "q"):
+                raise EOFError
+            typer.echo("Enter yes, no, or quit.")
+
+    try:
+        if len(set(grader)) != len(grader):
+            raise ValueError("Specify each grader only once")
+        settings = Settings.from_env()
+        latest = {
+            item.name: item
+            for item in Catalog(settings.data_dir).list_graders()
+            if item.status != "retired"
+        }
+        selected = []
+        for name in grader:
+            if name not in latest:
+                raise ValueError(f"No non-retired grader named {name}")
+            item = latest[name]
+            if not isinstance(item, JevGrader):
+                raise ValueError(f"{name} is a code grader; human labels require a Jev question")
+            selected.append(item)
+        counts = label_traces(
+            settings, selected, n, labels_dir or DEFAULT_LABELS_DIR, ask, typer.echo
+        )
+    except (EOFError, KeyboardInterrupt, typer.Abort):
+        typer.echo("Labeling stopped. Completed answers were saved; repeat the command to resume.")
+        return
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo("grader\tlabels")
+    for name, count in counts.items():
+        typer.echo(f"{name}\t{count}")
+
+
+for name in "bench chaos evals climb report".split():
     app.command(name=name, help="Planned for a later milestone.")(_not_implemented)
 
 

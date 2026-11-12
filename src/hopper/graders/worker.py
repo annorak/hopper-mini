@@ -30,7 +30,7 @@ from hopper.graders.code import CodeResult
 from hopper.graders.jev import JevClient, hash_state
 from hopper.graders.state import rfi_core
 from hopper.ledger import Ledger, SpendCapExceeded
-from hopper.query import GRADE_COLUMNS, connect
+from hopper.query import GRADE_COLUMNS, connect, grader_coverage
 
 BATCH_SIZE = 1_000
 POLL_SECONDS = 5
@@ -743,19 +743,7 @@ class Worker:
                     [self._started_at],
                 ).fetchall()
             }
-            self.stats.coverage = _rows(
-                connection.execute("""
-                SELECT a.grader, a.grader_version, count(t.trace_id) AS finished,
-                    count(g.trace_id) AS graded,
-                    count(t.trace_id) - count(g.trace_id) AS missing
-                FROM active_graders a
-                LEFT JOIN traces t ON t.finished
-                    AND (a.applies_to = '*' OR t.service = a.applies_to)
-                LEFT JOIN _fresh_grade_versions g ON g.trace_id = t.trace_id
-                    AND g.grader = a.grader AND g.grader_version = a.grader_version
-                GROUP BY a.grader, a.grader_version ORDER BY a.grader, a.grader_version
-            """)
-            )
+            self.stats.coverage = grader_coverage(connection)
             self.stats.lag_p50_seconds, self.stats.lag_p99_seconds = connection.execute(
                 """
                 WITH completed AS (

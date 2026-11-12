@@ -266,6 +266,46 @@ deploying or rolling back: older query code does not enforce revision freshness.
 See [the grading verification](benchmarks/grader-verification.md) for the live measurements,
 unsure examples, and SIGKILL recovery result.
 
+## Label and validate graders
+
+Check seed answers, then label 50 traces for the three Jev graders:
+
+```sh
+uv run hopper check
+uv run hopper label --grader answered_question --grader grounded --grader actionable --n 50
+uv run hopper graders validate --all
+uv run hopper graders coverage
+```
+
+`label` shows each grader's exact input and question. Enter `yes` or `no`, or `quit` to stop.
+Each answer is appended and synced immediately to `datasets/labels/<grader>.jsonl`.
+Repeat the command to resume toward the same per-grader target. Finishing a partially answered
+trace requires its original, unchanged snapshot in the store. Half the examples come from
+checker failures and half from checker passes. Odd targets use one more failure. Identical
+inputs count once. The command reports insufficient unique examples before prompting.
+
+The saved state survives rebuilding the trace store. `validate` reads those saved states,
+uses the grader's pinned model, and writes the complete result into its version file.
+It reports agreement, precision and recall for `no`, and a threshold sweep calculated from
+the same probabilities. `unsure` counts as disagreement. Undefined metrics print `n/a`.
+With no labels, validation saves a zero-label report without making a model request.
+
+Validate one version with `hopper graders validate grounded --version 1`. `--all` validates
+every non-retired Jev version. Code graders use their unit tests. Both labeling and validation
+accept `--labels-dir PATH` for a different golden dataset. A question, field, or applicability
+change requires matching human evidence. A malformed or incomplete JSONL record produces an
+error with its file path. Completed answers remain intact.
+
+Promotion requires at least 50 labels and 0.85 agreement at the configured thresholds.
+A complete report identifies both the grader definition and the evaluated labels. Changing
+the definition invalidates that report. Legacy two-number summaries remain readable but
+require revalidation before promotion. Failed or interrupted validation leaves the previous
+report intact. New full reports require this version of Hopper to read them.
+
+`coverage` counts each active version separately over finished applicable traces, including
+replays. It prints `yes`, `no`, `unsure`, and missing counts. Stale grades remain missing until
+the worker refreshes them. `unsure` counts as graded; a missing grade never counts as `no`.
+
 ## Build and inspect the Bayview corpus
 
 The fictional Bayview Pump Station Upgrade has 20 Markdown specifications, 12 drawing-note

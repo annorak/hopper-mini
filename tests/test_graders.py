@@ -1,11 +1,21 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from unittest.mock import Mock
 
 import pytest
 import yaml
 
-from hopper.graders import Catalog, CodeGrader, JevGrader, read_definition
+from hopper.graders import (
+    Catalog,
+    CodeGrader,
+    JevGrader,
+    ThresholdValidation,
+    Validation,
+    definition_fingerprint,
+    read_definition,
+    threshold_pairs,
+)
 from hopper.query import connect
 
 
@@ -172,7 +182,17 @@ def test_promotion_requires_label_count_and_agreement(catalog, definition, valid
 def test_promotion_keeps_predecessor_active_and_pin_unchanged(catalog, definition):
     catalog.install_seeds(Mock(return_value="jev-1.14.0"))
     grader = catalog.create_draft(definition)
-    write_validation(catalog, grader, {"labels": 50, "agreement": 0.85})
+    report = Validation(
+        labels=50,
+        agreement=0.85,
+        threshold_sweep=tuple(
+            ThresholdValidation(no, yes, 0.85, None, None) for no, yes in threshold_pairs(grader)
+        ),
+        validated_at="2026-11-11T00:00:00+00:00",
+        definition_hash=definition_fingerprint(grader),
+        labels_hash="a" * 64,
+    )
+    write_validation(catalog, grader, asdict(report))
     runner = Mock()
     promoted = catalog.promote(grader.name, grader.version, run_code_tests=runner)
     assert promoted.status == "active"
